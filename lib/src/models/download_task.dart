@@ -173,16 +173,15 @@ class DownloadTask {
   final DownloadNotificationConfig notificationConfig;
 
   /// Estimated remaining duration, or `null` if unknown or not running.
-  Duration? get estimatedRemaining =>
-      estimatedRemainingMs > 0 ? Duration(milliseconds: estimatedRemainingMs) : null;
+  Duration? get estimatedRemaining => estimatedRemainingMs > 0
+      ? Duration(milliseconds: estimatedRemainingMs)
+      : null;
 
   /// Created timestamp as a [DateTime].
-  DateTime get createdAt =>
-      DateTime.fromMillisecondsSinceEpoch(createdAtMs);
+  DateTime get createdAt => DateTime.fromMillisecondsSinceEpoch(createdAtMs);
 
   /// Last updated timestamp as a [DateTime].
-  DateTime get updatedAt =>
-      DateTime.fromMillisecondsSinceEpoch(updatedAtMs);
+  DateTime get updatedAt => DateTime.fromMillisecondsSinceEpoch(updatedAtMs);
 
   /// Completed timestamp as a [DateTime], if completed.
   DateTime? get completedAt => completedAtMs != null && completedAtMs! > 0

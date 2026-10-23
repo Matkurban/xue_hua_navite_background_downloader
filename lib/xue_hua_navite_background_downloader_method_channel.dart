@@ -84,12 +84,10 @@ class MethodChannelXueHuaNaviteBackgroundDownloader
 
   @override
   Future<List<DownloadTask>> enqueueAll(List<DownloadRequest> requests) async {
-    final list = await methodChannel.invokeListMethod<Object?>('enqueueAll', <
-      String,
-      Object?
-    >{
-      'requests': requests.map((r) => r.toMap()).toList(),
-    });
+    final list = await methodChannel.invokeListMethod<Object?>(
+      'enqueueAll',
+      <String, Object?>{'requests': requests.map((r) => r.toMap()).toList()},
+    );
     return _parseTaskList(list);
   }
 
