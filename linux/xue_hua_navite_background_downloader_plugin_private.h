@@ -2,9 +2,8 @@
 
 #include "include/xue_hua_navite_background_downloader/xue_hua_navite_background_downloader_plugin.h"
 
-// This file exposes some plugin internals for unit testing. See
-// https://github.com/flutter/flutter/issues/88724 for current limitations
-// in the unit-testable API.
+G_BEGIN_DECLS
 
-// Handles the getPlatformVersion method call.
-FlMethodResponse *get_platform_version();
+FlMethodResponse* get_capabilities_response();
+
+G_END_DECLS

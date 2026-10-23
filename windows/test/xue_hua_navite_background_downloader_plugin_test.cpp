@@ -13,30 +13,21 @@
 namespace xue_hua_navite_background_downloader {
 namespace test {
 
-namespace {
-
-using flutter::EncodableMap;
-using flutter::EncodableValue;
-using flutter::MethodCall;
-using flutter::MethodResultFunctions;
-
-}  // namespace
-
-TEST(XueHuaNaviteBackgroundDownloaderPlugin, GetPlatformVersion) {
+TEST(XueHuaNaviteBackgroundDownloaderPlugin, GetCapabilities) {
   XueHuaNaviteBackgroundDownloaderPlugin plugin;
-  // Save the reply value from the success callback.
-  std::string result_string;
+  flutter::EncodableMap result_map;
   plugin.HandleMethodCall(
-      MethodCall("getPlatformVersion", std::make_unique<EncodableValue>()),
-      std::make_unique<MethodResultFunctions<>>(
-          [&result_string](const EncodableValue* result) {
-            result_string = std::get<std::string>(*result);
+      flutter::MethodCall("getCapabilities",
+                          std::make_unique<flutter::EncodableValue>()),
+      std::make_unique<flutter::MethodResultFunctions<>>(
+          [&result_map](const flutter::EncodableValue* value) {
+            result_map = std::get<flutter::EncodableMap>(*value);
           },
           nullptr, nullptr));
 
-  // Since the exact string varies by host, just ensure that it's a string
-  // with the expected format.
-  EXPECT_TRUE(result_string.rfind("Windows ", 0) == 0);
+  auto it = result_map.find(flutter::EncodableValue("platform"));
+  ASSERT_NE(it, result_map.end());
+  EXPECT_EQ(std::get<std::string>(it->second), "windows");
 }
 
 }  // namespace test
