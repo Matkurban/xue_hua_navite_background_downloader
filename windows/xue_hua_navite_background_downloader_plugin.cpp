@@ -1,8 +1,11 @@
-#include "xue_hua_navite_background_downloader_plugin.h"
-
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include "xue_hua_navite_background_downloader_plugin.h"
+
 #include <windows.h>
 #include <bcrypt.h>
 #include <shellapi.h>
@@ -10,6 +13,7 @@
 #include <winhttp.h>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
@@ -400,10 +404,10 @@ void XueHuaNaviteBackgroundDownloaderPlugin::HandleMethodCall(
       max_concurrent_tasks_ =
           std::clamp(GetIntArg(*args, "maxConcurrentTasks", 3), 1, 16);
       connect_timeout_ms_ =
-          std::max(1000, GetIntArg(*args, "connectTimeoutMs", 15000));
+          (std::max)(1000, GetIntArg(*args, "connectTimeoutMs", 15000));
       read_timeout_ms_ =
-          std::max(1000, GetIntArg(*args, "readTimeoutMs", 30000));
-      progress_update_interval_ms_ = std::max<int64_t>(
+          (std::max)(1000, GetIntArg(*args, "readTimeoutMs", 30000));
+      progress_update_interval_ms_ = (std::max<int64_t>)(
           50, GetIntArg(*args, "progressUpdateIntervalMs", 250));
       enable_notifications_ = GetBoolArg(*args, "enableNotifications", true);
       user_agent_ = GetStringArg(
@@ -697,7 +701,7 @@ TaskRecord XueHuaNaviteBackgroundDownloaderPlugin::CreateOrResetTaskLocked(
   rec.conflict_resolution = conflict;
   rec.method = GetStringArg(args, "method", "GET");
   rec.post_body = GetStringArg(args, "postBody", "");
-  rec.max_retries = std::max(0, GetIntArg(args, "maxRetries", 2));
+  rec.max_retries = (std::max)(0, GetIntArg(args, "maxRetries", 2));
   rec.allow_pause = GetBoolArg(args, "allowPause", true);
   rec.supports_resume = rec.allow_pause;
   rec.requires_unmetered_network =
@@ -893,7 +897,7 @@ void XueHuaNaviteBackgroundDownloaderPlugin::ScheduleQueueLocked() {
               return a->created_at_ms < b->created_at_ms;
             });
 
-  int count = std::min(available, static_cast<int>(candidates.size()));
+  int count = (std::min)(available, static_cast<int>(candidates.size()));
   for (int i = 0; i < count; ++i) {
     TaskRecord* rec = candidates[i];
     rec->status = "running";
@@ -1085,7 +1089,7 @@ void XueHuaNaviteBackgroundDownloaderPlugin::RunDownloadWorker(
             break;
           }
           DWORD to_read =
-              std::min<DWORD>(avail, static_cast<DWORD>(buffer.size()));
+              (std::min<DWORD>)(avail, static_cast<DWORD>(buffer.size()));
           DWORD bytes_read = 0;
           if (!WinHttpReadData(hRequest, buffer.data(), to_read, &bytes_read) ||
               bytes_read == 0) {
@@ -1161,7 +1165,9 @@ void XueHuaNaviteBackgroundDownloaderPlugin::RunDownloadWorker(
           ComputeFileChecksum(part_path, snapshot.checksum_algorithm);
       std::string exp_lower = snapshot.expected_checksum;
       std::transform(exp_lower.begin(), exp_lower.end(), exp_lower.begin(),
-                     ::tolower);
+                         [](unsigned char ch) {
+                           return static_cast<char>(std::tolower(ch));
+                         });
       if (computed_hash != exp_lower) {
         fs::remove(part_path, ec);
         std::lock_guard<std::mutex> lock(state_mutex_);

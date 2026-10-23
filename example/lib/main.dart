@@ -56,9 +56,9 @@ class _PresetSample {
 
 const List<_PresetSample> _kPresetSamples = <_PresetSample>[
   _PresetSample(
-    label: 'Flutter Logo SVG (Small + Instant)',
-    url: 'https://raw.githubusercontent.com/flutter/website/main/src/content/assets/images/flutter-logo-sharing.png',
-    fileName: 'flutter-logo-sharing.png',
+    label: 'HTTPBin 64KB Binary (Small + Instant)',
+    url: 'https://httpbin.org/bytes/65536',
+    fileName: 'httpbin_64kb.bin',
     priority: DownloadPriority.critical,
   ),
   _PresetSample(

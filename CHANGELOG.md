@@ -1,3 +1,9 @@
+## 1.0.1
+
+* Windows: fix MSVC build under CMake 4.x / VS 2026 (NOMINMAX/std::min/std::max, 	olower C4244, googletest pin).
+* Windows: avoid MAX_PATH failures from the long googletest unit-test target under deep Flutter build trees.
+* Example: replace dead GitHub raw preset URL (HTTP 404) with httpbin.org/bytes/65536.
+* Example: add Windows download API integration verification test.
 ## 1.0.0
 
 * Initial stable release of `xue_hua_navite_background_downloader`.
