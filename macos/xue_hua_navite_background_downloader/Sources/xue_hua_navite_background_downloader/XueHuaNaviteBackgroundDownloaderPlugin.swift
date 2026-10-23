@@ -18,13 +18,15 @@ import UserNotifications
 public final class XueHuaNaviteBackgroundDownloaderPlugin: NSObject,
   FlutterPlugin,
   FlutterStreamHandler,
-  URLSessionDataDelegate
+  URLSessionDataDelegate,
+  UNUserNotificationCenterDelegate
 {
   public static let shared = XueHuaNaviteBackgroundDownloaderPlugin()
 
   private var methodChannel: FlutterMethodChannel?
   private var eventChannel: FlutterEventChannel?
   private var eventSink: FlutterEventSink?
+  private weak var previousNotificationDelegate: UNUserNotificationCenterDelegate?
 
   private let stateQueue = DispatchQueue(
     label: "com.kurban.xue_hua_navite_background_downloader.macos.state"
@@ -95,6 +97,28 @@ public final class XueHuaNaviteBackgroundDownloaderPlugin: NSObject,
     instance.eventChannel = eventChannel
     registrar.addMethodCallDelegate(instance, channel: methodChannel)
     eventChannel.setStreamHandler(instance)
+
+    let center = UNUserNotificationCenter.current()
+    if center.delegate !== instance {
+      instance.previousNotificationDelegate = center.delegate
+      center.delegate = instance
+    }
+  }
+
+  public func userNotificationCenter(
+    _ center: UNUserNotificationCenter,
+    willPresent notification: UNNotification,
+    withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+  ) {
+    if notification.request.identifier.hasPrefix("xue_hua_dl_") {
+      completionHandler([.banner, .list, .sound])
+    } else if let prev = previousNotificationDelegate,
+      prev.responds(to: #selector(UNUserNotificationCenterDelegate.userNotificationCenter(_:willPresent:withCompletionHandler:)))
+    {
+      prev.userNotificationCenter?(center, willPresent: notification, withCompletionHandler: completionHandler)
+    } else {
+      completionHandler([.banner, .list, .sound])
+    }
   }
 
   // MARK: - FlutterStreamHandler
