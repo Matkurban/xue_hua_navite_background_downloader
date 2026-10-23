@@ -785,7 +785,7 @@ public final class XueHuaNaviteBackgroundDownloaderPlugin: NSObject,
       }
       if let handle = FileHandle(forWritingAtPath: partPath) {
         if isPartial {
-          try? handle.seekToEnd()
+          _ = try? handle.seekToEnd()
         } else {
           try? handle.truncate(atOffset: 0)
         }
