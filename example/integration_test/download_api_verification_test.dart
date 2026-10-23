@@ -23,13 +23,23 @@ void main() {
     );
   });
 
-  testWidgets('capabilities expose Windows engine', (tester) async {
+  testWidgets('capabilities expose native engine', (tester) async {
     final caps = await downloader.getCapabilities();
-    expect(caps.platform.toLowerCase(), contains('windows'));
+    final platform = caps.platform.toLowerCase();
+    final engine = caps.nativeEngine.toLowerCase();
     expect(caps.supportsPauseResume, isTrue);
     expect(caps.supportsPersistence, isTrue);
     expect(caps.defaultDownloadDirectory.isNotEmpty, isTrue);
-    expect(caps.nativeEngine.toLowerCase(), contains('winhttp'));
+    if (Platform.isWindows) {
+      expect(platform, contains('windows'));
+      expect(engine, contains('winhttp'));
+    } else if (Platform.isLinux) {
+      expect(platform, contains('linux'));
+      expect(engine, contains('curl'));
+    } else {
+      expect(platform.isNotEmpty, isTrue);
+      expect(engine.isNotEmpty, isTrue);
+    }
     // ignore: avoid_print
     print(
       'CAPABILITIES: platform=${caps.platform} engine=${caps.nativeEngine} dir=${caps.defaultDownloadDirectory}',

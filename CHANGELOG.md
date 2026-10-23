@@ -1,3 +1,8 @@
+## 1.0.2
+
+* Linux: pin googletest to v1.15.2 so plugin unit-test FetchContent configures under CMake 4.x.
+* Example: make download API integration verification test platform-aware (Linux libcurl + Windows WinHTTP).
+
 ## 1.0.1
 
 * Windows: fix MSVC build under CMake 4.x / VS 2026 (NOMINMAX/std::min/std::max, 	olower C4244, googletest pin).
