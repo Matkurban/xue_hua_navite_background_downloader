@@ -1,3 +1,7 @@
+## 1.0.3
+
+* Shorten the pubspec `description` to 165 characters (within pub.dev's 60-180 range) so the package scores a valid `pubspec.yaml`.
+
 ## 1.0.2
 
 * Linux: pin googletest to v1.15.2 so plugin unit-test FetchContent configures under CMake 4.x.
