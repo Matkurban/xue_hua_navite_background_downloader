@@ -6,8 +6,8 @@ repository: https://github.com/Matkurban/xue_hua_navite_background_downloader
 issue_tracker: https://github.com/Matkurban/xue_hua_navite_background_downloader/issues
 
 environment:
-  sdk: ^3.13.5
-  flutter: '>=3.3.0'
+  sdk: ^3.13.0
+  flutter: '>=3.47.0'
 
 dependencies:
   flutter:
