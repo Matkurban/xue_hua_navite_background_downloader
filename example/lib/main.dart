@@ -57,8 +57,7 @@ class _PresetSample {
 const List<_PresetSample> _kPresetSamples = <_PresetSample>[
   _PresetSample(
     label: 'Flutter Logo SVG (Small + Instant)',
-    url:
-        'https://raw.githubusercontent.com/flutter/website/main/src/content/assets/images/flutter-logo-sharing.png',
+    url: 'https://raw.githubusercontent.com/flutter/website/main/src/content/assets/images/flutter-logo-sharing.png',
     fileName: 'flutter-logo-sharing.png',
     priority: DownloadPriority.critical,
   ),
@@ -76,8 +75,7 @@ const List<_PresetSample> _kPresetSamples = <_PresetSample>[
   ),
   _PresetSample(
     label: 'Sample JSON Spec (GitHub Raw)',
-    url:
-        'https://raw.githubusercontent.com/dart-lang/site-www/main/pubspec.yaml',
+    url: 'https://raw.githubusercontent.com/dart-lang/site-www/main/pubspec.yaml',
     fileName: 'dart_site_pubspec.yaml',
     priority: DownloadPriority.low,
   ),
@@ -215,7 +213,8 @@ class _DownloaderDashboardPageState extends State<DownloaderDashboardPage> {
       if (!mounted) return;
       setState(() {
         _tasks[task.taskId] = task;
-        _statusBanner = 'Enqueued task: ${task.fileName} (${task.priority.name})';
+        _statusBanner =
+            'Enqueued task: ${task.fileName} (${task.priority.name})';
       });
     } catch (e) {
       if (!mounted) return;
@@ -291,14 +290,18 @@ class _DownloaderDashboardPageState extends State<DownloaderDashboardPage> {
   @override
   Widget build(BuildContext context) {
     final tasks = _filteredTasks;
-    final runningCount =
-        _tasks.values.where((t) => t.status == DownloadStatus.running).length;
-    final queuedCount =
-        _tasks.values.where((t) => t.status == DownloadStatus.queued).length;
-    final pausedCount =
-        _tasks.values.where((t) => t.status == DownloadStatus.paused).length;
-    final completedCount =
-        _tasks.values.where((t) => t.status == DownloadStatus.completed).length;
+    final runningCount = _tasks.values
+        .where((t) => t.status == DownloadStatus.running)
+        .length;
+    final queuedCount = _tasks.values
+        .where((t) => t.status == DownloadStatus.queued)
+        .length;
+    final pausedCount = _tasks.values
+        .where((t) => t.status == DownloadStatus.paused)
+        .length;
+    final completedCount = _tasks.values
+        .where((t) => t.status == DownloadStatus.completed)
+        .length;
 
     return Scaffold(
       appBar: AppBar(
@@ -415,9 +418,12 @@ class _DownloaderDashboardPageState extends State<DownloaderDashboardPage> {
               children: <Widget>[
                 const Icon(Icons.memory_outlined, size: 20),
                 const SizedBox(width: 8),
-                Text(
-                  'Platform Engine: ${caps.platform.toUpperCase()} (${caps.nativeEngine})',
-                  style: Theme.of(context).textTheme.titleMedium,
+                Flexible(
+                  child: Text(
+                    'Platform Engine: ${caps.platform.toUpperCase()} (${caps.nativeEngine})',
+                    style: Theme.of(context).textTheme.titleMedium,
+                    maxLines: 3,
+                  ),
                 ),
               ],
             ),
@@ -677,8 +683,8 @@ class _DownloaderDashboardPageState extends State<DownloaderDashboardPage> {
   }
 
   Widget _buildTaskListHeader(int count) {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+    return Column(
+      mainAxisAlignment: .start,
       children: <Widget>[
         Text(
           'Persisted & Active Tasks ($count)',
@@ -810,10 +816,7 @@ class _DownloaderDashboardPageState extends State<DownloaderDashboardPage> {
                   ),
                 TextButton.icon(
                   onPressed: () async {
-                    await _downloader.removeTask(
-                      task.taskId,
-                      deleteFile: true,
-                    );
+                    await _downloader.removeTask(task.taskId, deleteFile: true);
                     if (!mounted) return;
                     setState(() {
                       _tasks.remove(task.taskId);
