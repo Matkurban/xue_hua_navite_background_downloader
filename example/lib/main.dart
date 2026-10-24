@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:xue_hua_navite_background_downloader/xue_hua_navite_background_downloader.dart';
 
 void main() {

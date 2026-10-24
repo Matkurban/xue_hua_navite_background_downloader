@@ -14,6 +14,7 @@ dependencies:
   xue_hua_navite_background_downloader:
     path: ../
   cupertino_icons: ^2.0.0
+  material_ui: ^1.6.0
 
 dev_dependencies:
   integration_test:
