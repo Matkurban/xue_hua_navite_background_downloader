@@ -43,7 +43,12 @@ set(xue_hua_navite_background_downloader_bundled_libraries
 # Native googletest target disabled: long plugin name makes MSBuild .tlog paths
 # exceed Windows MAX_PATH under typical Flutter example/build trees. Integration
 # tests cover the Windows download API. googletest pin kept for easy re-enable.
-if (FALSE AND ${include_${PROJECT_NAME}_tests})
+#
+# Keep this condition as if(FALSE) until those paths fit. To re-enable, use:
+#   if(${include_${PROJECT_NAME}_tests})
+# Do not write `if(FALSE AND ${include_${PROJECT_NAME}_tests})`. When that
+# variable is unset it expands to nothing and CMake errors on `if(FALSE AND)`.
+if(FALSE)
 set(TEST_RUNNER "${PROJECT_NAME}_test")
 enable_testing()
 
