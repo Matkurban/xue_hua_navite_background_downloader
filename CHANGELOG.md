@@ -1,3 +1,7 @@
+## 1.0.4
+
+* Windows: fix CMake configure error (`if(FALSE AND)` / unknown arguments) when the native googletest block stays disabled for MAX_PATH. The block remains off; re-enable with `if(${include_${PROJECT_NAME}_tests})` once paths allow.
+
 ## 1.0.3
 
 * Shorten the pubspec `description` to 165 characters (within pub.dev's 60-180 range) so the package scores a valid `pubspec.yaml`.
