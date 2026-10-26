@@ -123,6 +123,14 @@ void main() {
         holdFile,
         (text) => _isRunning(text) || _isQueued(text),
       );
+      // The paused worker keeps the only slot until it exits. If it exits
+      // during the pause window, the other file starts and hold stays queued.
+      // That is the scheduler, not a dropped event. Free the slot so resume
+      // is visible without waiting out the 1 GiB transfer.
+      if (_isQueued(await _status(driver, holdFile))) {
+        await _tap(driver, 'pause-$queuedFile');
+        await _waitStatus(driver, queuedFile, _isPaused);
+      }
       await _waitStatus(driver, holdFile, _isRunning);
 
       // ignore: avoid_print

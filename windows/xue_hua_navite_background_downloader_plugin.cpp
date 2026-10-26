@@ -27,6 +27,12 @@ namespace xue_hua_navite_background_downloader {
 
 namespace {
 
+constexpr wchar_t kEventWindowClassName[] =
+    L"XueHuaNaviteBackgroundDownloaderEventWindow";
+// Private to the message-only window this plugin creates on the platform
+// thread. WM_APP keeps it out of the WM_USER range used by other windows.
+constexpr UINT kEventFlushMessage = WM_APP + 0x4855;
+
 int64_t NowMs() {
   using namespace std::chrono;
   return duration_cast<milliseconds>(system_clock::now().time_since_epoch())
@@ -375,6 +381,7 @@ void XueHuaNaviteBackgroundDownloaderPlugin::RegisterWithRegistrar(
       });
   event_channel->SetStreamHandler(std::move(handler));
 
+  plugin_ptr->StartEventDispatcher();
   registrar->AddPlugin(std::move(plugin));
 }
 
@@ -385,10 +392,13 @@ XueHuaNaviteBackgroundDownloaderPlugin::XueHuaNaviteBackgroundDownloaderPlugin()
 
 XueHuaNaviteBackgroundDownloaderPlugin::~XueHuaNaviteBackgroundDownloaderPlugin() {
   shutting_down_.store(true);
-  std::lock_guard<std::mutex> lock(state_mutex_);
-  for (auto& kv : active_stop_flags_) {
-    kv.second->store(true);
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    for (auto& kv : active_stop_flags_) {
+      kv.second->store(true);
+    }
   }
+  StopEventDispatcher();
 }
 
 void XueHuaNaviteBackgroundDownloaderPlugin::HandleMethodCall(
@@ -1235,11 +1245,125 @@ void XueHuaNaviteBackgroundDownloaderPlugin::RunDownloadWorker(
   ScheduleQueueLocked();
 }
 
+void XueHuaNaviteBackgroundDownloaderPlugin::StartEventDispatcher() {
+  WNDCLASSW window_class{};
+  window_class.lpfnWndProc =
+      &XueHuaNaviteBackgroundDownloaderPlugin::EventDispatcherWndProc;
+  window_class.hInstance = ::GetModuleHandleW(nullptr);
+  window_class.lpszClassName = kEventWindowClassName;
+  ::RegisterClassW(&window_class);
+
+  HWND hwnd = ::CreateWindowExW(
+      0, kEventWindowClassName, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr,
+      window_class.hInstance, this);
+  if (hwnd == nullptr) {
+    ::OutputDebugStringW(
+        L"XueHua downloader: event dispatcher window was not created\n");
+    return;
+  }
+  ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+  std::lock_guard<std::mutex> lock(event_queue_mutex_);
+  event_hwnd_ = hwnd;
+  dispatcher_alive_ = true;
+}
+
+void XueHuaNaviteBackgroundDownloaderPlugin::StopEventDispatcher() {
+  HWND hwnd = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(event_queue_mutex_);
+    dispatcher_alive_ = false;
+    hwnd = event_hwnd_;
+    event_hwnd_ = nullptr;
+    pending_events_.clear();
+    event_dispatch_posted_ = false;
+  }
+  if (hwnd != nullptr) {
+    ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+    MSG leftover;
+    while (::PeekMessageW(&leftover, hwnd, kEventFlushMessage,
+                          kEventFlushMessage, PM_REMOVE)) {
+    }
+    ::DestroyWindow(hwnd);
+  }
+}
+
+void XueHuaNaviteBackgroundDownloaderPlugin::FlushTaskUpdates() {
+  std::vector<flutter::EncodableValue> batch;
+  {
+    std::lock_guard<std::mutex> lock(event_queue_mutex_);
+    batch.swap(pending_events_);
+    event_dispatch_posted_ = false;
+  }
+  std::lock_guard<std::mutex> sink_lock(sink_mutex_);
+  if (!event_sink_) {
+    return;
+  }
+  for (const auto& event : batch) {
+    event_sink_->Success(event);
+  }
+}
+
+LRESULT CALLBACK
+XueHuaNaviteBackgroundDownloaderPlugin::EventDispatcherWndProc(
+    HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+  if (message == WM_NCCREATE) {
+    const auto* create = reinterpret_cast<CREATESTRUCTW*>(lparam);
+    ::SetWindowLongPtrW(hwnd, GWLP_USERDATA,
+                        reinterpret_cast<LONG_PTR>(create->lpCreateParams));
+    return ::DefWindowProcW(hwnd, message, wparam, lparam);
+  }
+  auto* self = reinterpret_cast<XueHuaNaviteBackgroundDownloaderPlugin*>(
+      ::GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+  if (message == kEventFlushMessage && self != nullptr) {
+    self->FlushTaskUpdates();
+    return 0;
+  }
+  return ::DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
 void XueHuaNaviteBackgroundDownloaderPlugin::EmitTaskUpdate(
     const TaskRecord& record) {
-  std::lock_guard<std::mutex> lock(sink_mutex_);
-  if (event_sink_) {
-    event_sink_->Success(flutter::EncodableValue(record.ToMap()));
+  flutter::EncodableValue event(record.ToMap());
+  HWND target = nullptr;
+  bool schedule = false;
+  bool flush_now = false;
+  bool queued = false;
+  {
+    std::lock_guard<std::mutex> lock(event_queue_mutex_);
+    if (dispatcher_alive_ && event_hwnd_ != nullptr) {
+      const bool on_platform_thread =
+          ::GetWindowThreadProcessId(event_hwnd_, nullptr) ==
+          ::GetCurrentThreadId();
+      pending_events_.push_back(std::move(event));
+      queued = true;
+      if (on_platform_thread) {
+        flush_now = true;
+      } else if (!event_dispatch_posted_) {
+        event_dispatch_posted_ = true;
+        schedule = true;
+        target = event_hwnd_;
+      }
+    }
+  }
+
+  if (!queued) {
+    if (shutting_down_.load()) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(sink_mutex_);
+    if (event_sink_) {
+      event_sink_->Success(std::move(event));
+    }
+    return;
+  }
+  if (flush_now) {
+    FlushTaskUpdates();
+    return;
+  }
+  if (schedule && target != nullptr &&
+      !::PostMessageW(target, kEventFlushMessage, 0, 0)) {
+    std::lock_guard<std::mutex> lock(event_queue_mutex_);
+    event_dispatch_posted_ = false;
   }
 }
 

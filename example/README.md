@@ -49,3 +49,14 @@ flutter drive `
 ```
 
 On Linux without a display, prefix the drive command with `xvfb-run -a`. The drive configures `maxConcurrentTasks`, turns notifications off, enqueues a small download to completion, filters groups, holds a queue with a large OVH file, and exercises pause, resume, batch, and cancel. Cancel checks the canceled state only. A fast link can cancel before any bytes land.
+
+### Windows path length
+
+MSBuild writes `.tlog` files under the example build tree. A checkout under a long path such as `C:\Users\...\StudioProjects\...` can exceed `MAX_PATH` and fail the Windows build. Clone into a short directory, or map the repo with a junction and build from there:
+
+```powershell
+New-Item -ItemType Junction -Path C:\bgdl -Target C:\path\to\xue_hua_navite_background_downloader
+cd C:\bgdl\example
+```
+
+The Windows native googletest target stays disabled with `if(FALSE)` in `windows/CMakeLists.txt` for the same limit. Leave that guard as `if(FALSE)`. `if(FALSE AND ...)` is invalid CMake when the tests variable is unset.
