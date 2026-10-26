@@ -18,7 +18,7 @@ samples, guidance on mobile development, and a full API reference.
 
 ## Desktop tests
 
-The same driver and integration tests run on Linux and Windows. Finders use `ValueKey` strings, and file paths come from `Directory.systemTemp`, `Platform.pathSeparator`, or the plugin's `defaultDownloadDirectory`. Nothing in the Dart tests hardcodes a host path.
+The same driver and integration tests run on Linux, Windows, macOS, and the iOS simulator. Finders use `ValueKey` strings. File paths come from `Directory.systemTemp`, `Platform.pathSeparator`, or `getCapabilities()` (`defaultDownloadDirectory` and `taskStorePath`). The task store is not the same file on every host: Apple uses Application Support `xue_hua_background_downloader/tasks.json`, Android uses `filesDir/xue_hua_downloader_tasks.json`, and Linux and Windows use `xue_hua_downloader_tasks.tsv` in the default download directory.
 
 `flutter test integration_test/` starts the desktop app once per `*_test.dart` inside one tool process. The second file often fails with `Unable to start the app`. Run each file in its own process. `example/tool/run_desktop_tests.sh` does that on Linux (under Xvfb), macOS, and Windows Git Bash. On Windows PowerShell use `example/tool/run_desktop_tests.ps1`. `example/tool/run_linux_tests.sh` is a wrapper around the shell script.
 
@@ -48,7 +48,33 @@ flutter drive `
   -d windows
 ```
 
-On Linux without a display, prefix the drive command with `xvfb-run -a`. The drive configures `maxConcurrentTasks`, turns notifications off, enqueues a small download to completion, filters groups, holds a queue with a large OVH file, and exercises pause, resume, batch, and cancel. Cancel checks the canceled state only. A fast link can cancel before any bytes land.
+On Linux without a display, prefix the drive command with `xvfb-run -a`. The drive configures `maxConcurrentTasks`, turns notifications off, enqueues a small download to completion, filters groups, holds a queue with a large OVH file, and exercises pause, resume, batch, and cancel. Cancel checks the canceled state only. A fast link can cancel before any bytes land. Phone-width layouts (the iOS simulator) keep every keyed control in one scroll view. The driver scrolls each target into view and dismisses the software keyboard after text entry. No iOS step is skipped.
+
+### macOS
+
+`example/tool/run_desktop_tests.sh` selects the `macos` device on Darwin. From `example/`:
+
+```bash
+flutter test -d macos integration_test/download_api_verification_test.dart
+flutter drive \
+  --driver=test_driver/app_test.dart \
+  --target=test_driver/app.dart \
+  -d macos
+```
+
+### iOS simulator
+
+Boot a simulator, then run both suites with `example/tool/run_ios_simulator_tests.sh`. Pass a UDID as the first argument, or set `IOS_DEVICE`, when more than one simulator is available. The script runs the integration file, then the same `flutter_driver` script used on the desktop. From `example/`:
+
+```bash
+xcrun simctl boot "iPhone 16"
+open -a Simulator
+flutter test -d <simulator-udid> integration_test/download_api_verification_test.dart
+flutter drive \
+  --driver=test_driver/app_test.dart \
+  --target=test_driver/app.dart \
+  -d <simulator-udid>
+```
 
 ### Windows path length
 

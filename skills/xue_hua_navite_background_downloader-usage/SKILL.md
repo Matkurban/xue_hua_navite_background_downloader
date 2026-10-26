@@ -15,6 +15,7 @@ Provide idiomatic integration patterns, platform setup rules, and best practices
 * Call `requestNotificationPermission()` before enqueuing downloads if `enableNotifications: true` is used on Android 13+ (API 33+), iOS, or macOS.
 * Subscribe to `XueHuaNaviteBackgroundDownloader.instance.taskUpdates` (or `watchTask(taskId)` / `watchGroup(group)`) to receive throttled real-time progress, speed (`bytesPerSecond`), and ETA (`estimatedRemaining`) updates, and always cancel the `StreamSubscription` in `dispose()`.
 * Pass an empty string `''` for `saveDirectory` in `DownloadRequest` if you want the native engine to automatically resolve the platform's default download directory (inspectable via `getCapabilities()`).
+* Read `getCapabilities().taskStorePath` for the persisted queue file. Apple stores `Application Support/xue_hua_background_downloader/tasks.json`. Android stores `filesDir/xue_hua_downloader_tasks.json`. Linux and Windows store `xue_hua_downloader_tasks.tsv` in the default download directory. Do not hardcode one of those layouts for every host.
 * Use `DownloadConflictResolution.uniqueName` when downloading user-initiated files into shared directories so existing files are not silently overwritten.
 * Provide `expectedChecksum` and `checksumAlgorithm` (`ChecksumAlgorithm.sha256` or `ChecksumAlgorithm.md5`) when downloading release binaries, firmware, or asset bundles that require integrity verification.
 

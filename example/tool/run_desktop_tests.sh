@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Desktop checks for the example app and plugin.
 #
-# Works on Linux (Xvfb), macOS, and Windows Git Bash / MSYS. Device ids,
+# Works on Linux (Xvfb), macOS, and Windows Git Bash / MSYS. The iOS
+# simulator is example/tool/run_ios_simulator_tests.sh. Device ids,
 # build targets, and the download directory come from the host OS. Override
 # the Flutter binary with FLUTTER_BIN and the download folder with
 # XUEHUA_DOWNLOAD_DIR when the OS default is not the one the plugin uses.

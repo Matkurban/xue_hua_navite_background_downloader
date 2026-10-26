@@ -26,6 +26,7 @@ dev_dependencies:
   test: ^1.26.2
   plugin_platform_interface: ^2.1.8
   flutter_lints: ^6.0.0
+  crypto: ^3.0.6
 
 flutter:
   uses-material-design: true

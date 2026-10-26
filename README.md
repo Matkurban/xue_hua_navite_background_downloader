@@ -124,6 +124,7 @@ Future<void> setupDownloader() async {
   final capabilities = await downloader.getCapabilities();
   print('Engine: ${capabilities.nativeEngine}');
   print('Default directory: ${capabilities.defaultDownloadDirectory}');
+  print('Task store: ${capabilities.taskStorePath}');
 
   // 4. Restore persisted tasks from previous app launch
   final persistedTasks = await downloader.getAllTasks();

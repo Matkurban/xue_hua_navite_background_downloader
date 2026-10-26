@@ -11,6 +11,7 @@ class DownloaderCapabilities {
     required this.supportsChecksumVerification,
     required this.supportsNetworkConstraints,
     required this.defaultDownloadDirectory,
+    this.taskStorePath = '',
   });
 
   /// Platform identifier (`android`, `ios`, `macos`, `windows`, or `linux`).
@@ -40,6 +41,16 @@ class DownloaderCapabilities {
   /// Default directory path used by the native platform when `saveDirectory` is empty.
   final String defaultDownloadDirectory;
 
+  /// Absolute path of the on-disk task store.
+  ///
+  /// Apple platforms persist JSON at
+  /// `Application Support/xue_hua_background_downloader/tasks.json`.
+  /// Android persists JSON at `filesDir/xue_hua_downloader_tasks.json`.
+  /// Linux and Windows persist TSV at
+  /// `defaultDownloadDirectory/xue_hua_downloader_tasks.tsv`.
+  /// Empty when the native engine did not report a path.
+  final String taskStorePath;
+
   /// Deserializes [DownloaderCapabilities] from a platform channel map.
   factory DownloaderCapabilities.fromMap(Map<Object?, Object?> map) {
     return DownloaderCapabilities(
@@ -57,6 +68,7 @@ class DownloaderCapabilities {
           map['supportsNetworkConstraints'] as bool? ?? true,
       defaultDownloadDirectory:
           map['defaultDownloadDirectory'] as String? ?? '',
+      taskStorePath: map['taskStorePath'] as String? ?? '',
     );
   }
 
@@ -71,5 +83,6 @@ class DownloaderCapabilities {
     'supportsChecksumVerification': supportsChecksumVerification,
     'supportsNetworkConstraints': supportsNetworkConstraints,
     'defaultDownloadDirectory': defaultDownloadDirectory,
+    'taskStorePath': taskStorePath,
   };
 }

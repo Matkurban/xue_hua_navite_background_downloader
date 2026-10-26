@@ -1,3 +1,4 @@
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:plugin_platform_interface/plugin_platform_interface.dart';
 import 'package:xue_hua_navite_background_downloader/xue_hua_navite_background_downloader.dart';
@@ -104,5 +105,38 @@ void main() {
     expect(find.text('Native Background Downloader'), findsOneWidget);
     expect(find.textContaining('Platform Engine: MACOS'), findsOneWidget);
     expect(find.text('Enqueue 4-Task Priority Batch'), findsOneWidget);
+    // Phone width builds the enqueue field even when it is below the fold.
+    expect(
+      find.byKey(const ValueKey<String>('dashboard-scroll')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey<String>('download-filename-field')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('wide layout keeps enqueue controls in the control pane', (
+    WidgetTester tester,
+  ) async {
+    XueHuaNaviteBackgroundDownloaderPlatform.instance =
+        _FakeDownloaderPlatform();
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(1280, 720);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+
+    await tester.pumpWidget(const DownloaderExampleApp());
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey<String>('control-pane')), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey<String>('download-filename-field')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey<String>('dashboard-scroll')),
+      findsNothing,
+    );
   });
 }

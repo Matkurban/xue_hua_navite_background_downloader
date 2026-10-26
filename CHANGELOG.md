@@ -1,3 +1,9 @@
+## 1.0.7
+
+* `getCapabilities()` reports `taskStorePath`, the absolute path of the persisted task queue. Apple platforms use Application Support `xue_hua_background_downloader/tasks.json`. Android uses `filesDir/xue_hua_downloader_tasks.json`. Linux and Windows keep `xue_hua_downloader_tasks.tsv` in the default download directory. The field defaults to empty when an older engine omits it.
+* Example: the `getAllTasks` integration check reads `taskStorePath` instead of assuming the desktop TSV layout. The checksum case hashes with `package:crypto` so it can run on iOS, where `Process` is unavailable.
+* Example: phone-width layouts build the dashboard in one scroll view, and `flutter_driver` scrolls each control into view, dismisses the software keyboard, and waits longer for keys. The iOS simulator uses the same script as macOS, Windows, and Linux. Run it with `example/tool/run_ios_simulator_tests.sh`.
+
 ## 1.0.6
 
 * Windows: deliver EventChannel task updates on the platform thread. Progress, completion, and the running transition scheduled when a worker exits were sent from the download thread, so Flutter logged `events` as a non-platform-thread channel and could drop the update. Pause, resume, cancel, and progress still emit the same payloads. Linux continues to marshal with `g_idle_add`.

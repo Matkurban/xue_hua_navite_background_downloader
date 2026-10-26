@@ -338,7 +338,8 @@ class _DownloaderDashboardPageState extends State<DownloaderDashboardPage> {
   Widget _buildBody(List<DownloadTask> tasks) {
     final wide = MediaQuery.sizeOf(context).width >= 1000;
     // Wide layout puts the controls the driver taps above the capabilities
-    // card so they stay inside a 1280x720 window on Linux and Windows.
+    // card so they stay inside a 1280x720 window. Phone width (iOS) uses one
+    // eager scroll view so every keyed control exists before it is on screen.
     final controls = <Widget>[
       if (!wide) _buildCapabilitiesCard(),
       if (!wide) const SizedBox(height: 12),
@@ -374,16 +375,21 @@ class _DownloaderDashboardPageState extends State<DownloaderDashboardPage> {
         children: <Widget>[
           SizedBox(
             width: 460,
-            child: ListView(
+            child: SingleChildScrollView(
               key: const ValueKey<String>('control-pane'),
+              keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
               padding: const EdgeInsets.all(16),
-              children: controls,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: controls,
+              ),
             ),
           ),
           const VerticalDivider(width: 1),
           Expanded(
             child: SingleChildScrollView(
               key: const ValueKey<String>('task-pane'),
+              keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
               padding: const EdgeInsets.all(16),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -395,9 +401,20 @@ class _DownloaderDashboardPageState extends State<DownloaderDashboardPage> {
       );
     }
 
-    return ListView(
+    // A lazy ListView does not build the filename field until it scrolls into
+    // the cache. flutter_driver then times out waiting for the key on iOS.
+    return SingleChildScrollView(
+      key: const ValueKey<String>('dashboard-scroll'),
+      keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
       padding: const EdgeInsets.all(16),
-      children: <Widget>[...controls, const SizedBox(height: 16), ...taskPane],
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          ...controls,
+          const SizedBox(height: 16),
+          ...taskPane,
+        ],
+      ),
     );
   }
 
@@ -670,6 +687,8 @@ class _DownloaderDashboardPageState extends State<DownloaderDashboardPage> {
             TextField(
               key: const ValueKey<String>('download-url-field'),
               controller: _urlController,
+              onTapOutside: (_) =>
+                  FocusManager.instance.primaryFocus?.unfocus(),
               decoration: const InputDecoration(
                 labelText: 'Download URL',
                 border: OutlineInputBorder(),
@@ -683,6 +702,8 @@ class _DownloaderDashboardPageState extends State<DownloaderDashboardPage> {
                   child: TextField(
                     key: const ValueKey<String>('download-filename-field'),
                     controller: _fileNameController,
+                    onTapOutside: (_) =>
+                        FocusManager.instance.primaryFocus?.unfocus(),
                     decoration: const InputDecoration(
                       labelText: 'File Name (Optional)',
                       border: OutlineInputBorder(),
@@ -694,6 +715,8 @@ class _DownloaderDashboardPageState extends State<DownloaderDashboardPage> {
                 Expanded(
                   child: TextField(
                     controller: _checksumController,
+                    onTapOutside: (_) =>
+                        FocusManager.instance.primaryFocus?.unfocus(),
                     decoration: const InputDecoration(
                       labelText: 'Expected Checksum (Optional Hex)',
                       border: OutlineInputBorder(),

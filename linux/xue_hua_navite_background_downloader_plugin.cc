@@ -127,6 +127,11 @@ std::string DefaultDownloadDir() {
   return dir.string();
 }
 
+std::string TaskStorePath() {
+  return (fs::path(DefaultDownloadDir()) / "xue_hua_downloader_tasks.tsv")
+      .string();
+}
+
 std::string GetFlString(FlValue* map, const char* key,
                         const std::string& fallback = "") {
   if (!map || fl_value_get_type(map) != FL_VALUE_TYPE_MAP) return fallback;
@@ -1040,8 +1045,7 @@ class LinuxDownloaderEngine {
   }
 
   void PersistLocked() {
-    fs::path p = fs::path(DefaultDownloadDir()) / "xue_hua_downloader_tasks.tsv";
-    std::ofstream ofs(p, std::ios::trunc);
+    std::ofstream ofs(TaskStorePath(), std::ios::trunc);
     if (!ofs.is_open()) return;
     for (const auto& kv : tasks_) {
       const auto& r = kv.second;
@@ -1054,8 +1058,7 @@ class LinuxDownloaderEngine {
   }
 
   void LoadPersistedLocked() {
-    fs::path p = fs::path(DefaultDownloadDir()) / "xue_hua_downloader_tasks.tsv";
-    std::ifstream ifs(p);
+    std::ifstream ifs(TaskStorePath());
     if (!ifs.is_open()) return;
     std::string line;
     while (std::getline(ifs, line)) {
@@ -1127,6 +1130,9 @@ FlMethodResponse* get_capabilities_response() {
   std::string def_dir = DefaultDownloadDir();
   fl_value_set_string_take(map, "defaultDownloadDirectory",
                            fl_value_new_string(def_dir.c_str()));
+  std::string store = TaskStorePath();
+  fl_value_set_string_take(map, "taskStorePath",
+                           fl_value_new_string(store.c_str()));
   return FL_METHOD_RESPONSE(fl_method_success_response_new(map));
 }
 

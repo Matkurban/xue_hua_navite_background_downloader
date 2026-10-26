@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:xue_hua_navite_background_downloader/xue_hua_navite_background_downloader.dart';
@@ -36,6 +37,7 @@ void main() {
     expect(caps.supportsPauseResume, isTrue);
     expect(caps.supportsPersistence, isTrue);
     expect(caps.defaultDownloadDirectory.isNotEmpty, isTrue);
+    _expectTaskStorePath(caps.taskStorePath);
     if (Platform.isWindows) {
       expect(platform, contains('windows'));
       expect(engine, contains('winhttp'));
@@ -48,7 +50,7 @@ void main() {
     }
     // ignore: avoid_print
     print(
-      'CAPABILITIES: platform=${caps.platform} engine=${caps.nativeEngine} dir=${caps.defaultDownloadDirectory}',
+      'CAPABILITIES: platform=${caps.platform} engine=${caps.nativeEngine} dir=${caps.defaultDownloadDirectory} store=${caps.taskStorePath}',
     );
   });
 
@@ -415,10 +417,17 @@ void main() {
       expect(other.map((item) => item.taskId), isNot(contains(task.taskId)));
 
       final caps = await downloader.getCapabilities();
-      final store = File(
-        _join(caps.defaultDownloadDirectory, 'xue_hua_downloader_tasks.tsv'),
+      _expectTaskStorePath(caps.taskStorePath);
+      final store = File(caps.taskStorePath);
+      final storeDeadline = DateTime.now().add(const Duration(seconds: 5));
+      while (!store.existsSync() && DateTime.now().isBefore(storeDeadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      }
+      expect(
+        store.existsSync(),
+        isTrue,
+        reason: 'task store missing at ${caps.taskStorePath}',
       );
-      expect(store.existsSync(), isTrue);
       expect(await store.readAsString(), contains(task.taskId));
 
       await downloader.removeTask(task.taskId, deleteFile: true);
@@ -426,6 +435,25 @@ void main() {
       await dir.delete(recursive: true);
     }
   });
+}
+
+/// Apple keeps the queue in Application Support JSON. Android uses its
+/// files directory. Linux and Windows keep a TSV next to downloads.
+void _expectTaskStorePath(String path) {
+  expect(path, isNotEmpty);
+  if (Platform.isIOS || Platform.isMacOS) {
+    final separator = Platform.pathSeparator;
+    expect(
+      path,
+      contains(
+        '${separator}xue_hua_background_downloader${separator}tasks.json',
+      ),
+    );
+  } else if (Platform.isAndroid) {
+    expect(path, endsWith('xue_hua_downloader_tasks.json'));
+  } else if (Platform.isLinux || Platform.isWindows) {
+    expect(path, endsWith('xue_hua_downloader_tasks.tsv'));
+  }
 }
 
 String _join(String directory, String name) {
@@ -458,18 +486,9 @@ Future<DownloadTask> _waitTerminal(
   );
 }
 
+/// Pure Dart SHA-256. iOS forbids `Process.start`, so the checksum case
+/// cannot shell out to `sha256sum` / `shasum` / `certutil`.
 Future<String> _sha256Hex(String path) async {
-  ProcessResult result;
-  if (Platform.isWindows) {
-    result = await Process.run('certutil', ['-hashfile', path, 'SHA256']);
-  } else if (Platform.isMacOS) {
-    result = await Process.run('shasum', ['-a', '256', path]);
-  } else {
-    result = await Process.run('sha256sum', [path]);
-  }
-  expect(result.exitCode, 0, reason: '${result.stderr}');
-  final match = RegExp(r'[0-9a-fA-F]{64}')
-      .firstMatch(result.stdout.toString().replaceAll(' ', ''));
-  expect(match, isNotNull, reason: result.stdout.toString());
-  return match!.group(0)!.toLowerCase();
+  final digest = await sha256.bind(File(path).openRead()).first;
+  return digest.toString();
 }

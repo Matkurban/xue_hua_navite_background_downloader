@@ -32,6 +32,8 @@ void main() {
                 'supportsChecksumVerification': true,
                 'supportsNetworkConstraints': true,
                 'defaultDownloadDirectory': '/tmp/downloads',
+                'taskStorePath':
+                    '/tmp/xue_hua_background_downloader/tasks.json',
               };
             case 'requestNotificationPermission':
               return true;
@@ -99,36 +101,50 @@ void main() {
     expect(caps.supportsPauseResume, isTrue);
     expect(caps.supportsPersistence, isTrue);
     expect(caps.defaultDownloadDirectory, '/tmp/downloads');
+    expect(caps.taskStorePath, '/tmp/xue_hua_background_downloader/tasks.json');
+    expect(caps.toMap()['taskStorePath'], caps.taskStorePath);
   });
 
-  test('enqueue, pause, resume, and clearCompleted invoke method channel', () async {
-    final task = await platform.enqueue(
-      const DownloadRequest(
-        url: 'https://example.com/file.bin',
-        saveDirectory: '/tmp/downloads',
-        fileName: 'file.bin',
-        taskId: 'task_1',
-        priority: DownloadPriority.high,
-      ),
-    );
-    expect(task.taskId, 'task_1');
-    expect(task.status, DownloadStatus.queued);
-    expect(task.priority, DownloadPriority.high);
-
-    final paused = await platform.pause('task_1');
-    expect(paused?.status, DownloadStatus.paused);
-    expect(paused?.downloadedBytes, 512);
-
-    final resumed = await platform.resume('task_1');
-    expect(resumed?.status, DownloadStatus.queued);
-
-    final cleared = await platform.clearCompleted(deleteFiles: true);
-    expect(cleared, 2);
-    expect(log.map((c) => c.method), <String>[
-      'enqueue',
-      'pause',
-      'resume',
-      'clearCompleted',
-    ]);
+  test('taskStorePath is empty when the engine omits it', () {
+    final caps = DownloaderCapabilities.fromMap(<Object?, Object?>{
+      'platform': 'linux',
+      'defaultDownloadDirectory': '/tmp/downloads',
+    });
+    expect(caps.taskStorePath, isEmpty);
+    expect(caps.toMap()['taskStorePath'], isEmpty);
   });
+
+  test(
+    'enqueue, pause, resume, and clearCompleted invoke method channel',
+    () async {
+      final task = await platform.enqueue(
+        const DownloadRequest(
+          url: 'https://example.com/file.bin',
+          saveDirectory: '/tmp/downloads',
+          fileName: 'file.bin',
+          taskId: 'task_1',
+          priority: DownloadPriority.high,
+        ),
+      );
+      expect(task.taskId, 'task_1');
+      expect(task.status, DownloadStatus.queued);
+      expect(task.priority, DownloadPriority.high);
+
+      final paused = await platform.pause('task_1');
+      expect(paused?.status, DownloadStatus.paused);
+      expect(paused?.downloadedBytes, 512);
+
+      final resumed = await platform.resume('task_1');
+      expect(resumed?.status, DownloadStatus.queued);
+
+      final cleared = await platform.clearCompleted(deleteFiles: true);
+      expect(cleared, 2);
+      expect(log.map((c) => c.method), <String>[
+        'enqueue',
+        'pause',
+        'resume',
+        'clearCompleted',
+      ]);
+    },
+  );
 }
