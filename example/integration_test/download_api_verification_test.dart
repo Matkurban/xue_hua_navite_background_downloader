@@ -5,6 +5,12 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:xue_hua_navite_background_downloader/xue_hua_navite_background_downloader.dart';
 
+// Single integration_test entrypoint. On Linux desktop, `flutter test`
+// launching a second `*_test.dart` in the same process often fails with
+// "Unable to start the app" because the VM service log reader does not
+// survive the restart. Keep additional cases in this file, or run each
+// file in its own process via `tool/run_linux_tests.sh`.
+
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
@@ -44,6 +50,15 @@ void main() {
     print(
       'CAPABILITIES: platform=${caps.platform} engine=${caps.nativeEngine} dir=${caps.defaultDownloadDirectory}',
     );
+  });
+
+  testWidgets('getCapabilities returns valid platform capabilities', (
+    tester,
+  ) async {
+    final caps = await downloader.getCapabilities();
+    expect(caps.platform.isNotEmpty, true);
+    expect(caps.supportsPauseResume, true);
+    expect(caps.supportsPersistence, true);
   });
 
   testWidgets('enqueue completes small download with progress', (tester) async {
@@ -121,8 +136,10 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 300));
     }
 
-    final canceled =
-        await downloader.cancel(task.taskId, deletePartialFile: true);
+    final canceled = await downloader.cancel(
+      task.taskId,
+      deletePartialFile: true,
+    );
     // ignore: avoid_print
     print(
       'CANCELED: status=${canceled?.status.name} bytes=${canceled?.downloadedBytes}',
@@ -162,15 +179,17 @@ void main() {
       }
       if (latest != null && latest.status == DownloadStatus.completed) {
         // ignore: avoid_print
-        print(
-          'PAUSE_SKIP: completed too fast bytes=${latest.downloadedBytes}',
-        );
+        print('PAUSE_SKIP: completed too fast bytes=${latest.downloadedBytes}');
         await downloader.removeTask(task.taskId, deleteFile: true);
         return;
       }
       await Future<void>.delayed(const Duration(milliseconds: 200));
     }
-    expect(running, isNotNull, reason: 'never reached running state with bytes');
+    expect(
+      running,
+      isNotNull,
+      reason: 'never reached running state with bytes',
+    );
 
     final paused = await downloader.pause(task.taskId);
     // ignore: avoid_print

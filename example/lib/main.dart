@@ -159,6 +159,13 @@ class _DownloaderDashboardPageState extends State<DownloaderDashboardPage> {
     });
   }
 
+  void _setMaxConcurrent(int value) {
+    setState(() {
+      _maxConcurrentTasks = value.clamp(1, 8);
+    });
+    _applyConfiguration();
+  }
+
   Future<void> _applyConfiguration() async {
     await _downloader.configure(
       DownloaderConfig(
@@ -379,6 +386,7 @@ class _DownloaderDashboardPageState extends State<DownloaderDashboardPage> {
         children: <Widget>[
           Text(
             _statusBanner,
+            key: const ValueKey<String>('status-banner'),
             style: TextStyle(
               color: colorScheme.onSecondaryContainer,
               fontWeight: FontWeight.w600,
@@ -483,19 +491,45 @@ class _DownloaderDashboardPageState extends State<DownloaderDashboardPage> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: <Widget>[
-                      Text('Max Concurrent Downloads: $_maxConcurrentTasks'),
-                      Slider(
-                        value: _maxConcurrentTasks.toDouble(),
-                        min: 1,
-                        max: 8,
-                        divisions: 7,
-                        label: '$_maxConcurrentTasks',
-                        onChanged: (value) {
-                          setState(() {
-                            _maxConcurrentTasks = value.round();
-                          });
-                        },
-                        onChangeEnd: (_) => _applyConfiguration(),
+                      Text(
+                        'Max Concurrent Downloads: $_maxConcurrentTasks',
+                        key: const ValueKey<String>('max-concurrent-label'),
+                      ),
+                      Row(
+                        children: <Widget>[
+                          IconButton(
+                            key: const ValueKey<String>('concurrency-dec'),
+                            tooltip: 'Decrease max concurrent downloads',
+                            onPressed: () =>
+                                _setMaxConcurrent(_maxConcurrentTasks - 1),
+                            icon: const Icon(Icons.remove),
+                          ),
+                          Expanded(
+                            child: Slider(
+                              key: const ValueKey<String>(
+                                'max-concurrent-slider',
+                              ),
+                              value: _maxConcurrentTasks.toDouble(),
+                              min: 1,
+                              max: 8,
+                              divisions: 7,
+                              label: '$_maxConcurrentTasks',
+                              onChanged: (value) {
+                                setState(() {
+                                  _maxConcurrentTasks = value.round();
+                                });
+                              },
+                              onChangeEnd: (_) => _applyConfiguration(),
+                            ),
+                          ),
+                          IconButton(
+                            key: const ValueKey<String>('concurrency-inc'),
+                            tooltip: 'Increase max concurrent downloads',
+                            onPressed: () =>
+                                _setMaxConcurrent(_maxConcurrentTasks + 1),
+                            icon: const Icon(Icons.add),
+                          ),
+                        ],
                       ),
                     ],
                   ),
@@ -518,11 +552,13 @@ class _DownloaderDashboardPageState extends State<DownloaderDashboardPage> {
               runSpacing: 8,
               children: <Widget>[
                 FilledButton.icon(
+                  key: const ValueKey<String>('enqueue-batch-button'),
                   onPressed: _enqueueBatchDemo,
                   icon: const Icon(Icons.playlist_add),
                   label: const Text('Enqueue 4-Task Priority Batch'),
                 ),
                 OutlinedButton.icon(
+                  key: const ValueKey<String>('pause-all-button'),
                   onPressed: () async {
                     await _downloader.pauseAll();
                     await _refreshPersistedTasks();
@@ -531,6 +567,7 @@ class _DownloaderDashboardPageState extends State<DownloaderDashboardPage> {
                   label: const Text('Pause All'),
                 ),
                 OutlinedButton.icon(
+                  key: const ValueKey<String>('resume-all-button'),
                   onPressed: () async {
                     await _downloader.resumeAll();
                     await _refreshPersistedTasks();
@@ -539,6 +576,7 @@ class _DownloaderDashboardPageState extends State<DownloaderDashboardPage> {
                   label: const Text('Resume All'),
                 ),
                 OutlinedButton.icon(
+                  key: const ValueKey<String>('cancel-all-button'),
                   onPressed: () async {
                     await _downloader.cancelAll();
                     await _refreshPersistedTasks();
@@ -547,6 +585,7 @@ class _DownloaderDashboardPageState extends State<DownloaderDashboardPage> {
                   label: const Text('Cancel All'),
                 ),
                 OutlinedButton.icon(
+                  key: const ValueKey<String>('clear-completed-button'),
                   onPressed: () async {
                     final removed = await _downloader.clearCompleted(
                       deleteFiles: false,
@@ -581,6 +620,7 @@ class _DownloaderDashboardPageState extends State<DownloaderDashboardPage> {
             ),
             const SizedBox(height: 10),
             TextField(
+              key: const ValueKey<String>('download-url-field'),
               controller: _urlController,
               decoration: const InputDecoration(
                 labelText: 'Download URL',
@@ -593,6 +633,7 @@ class _DownloaderDashboardPageState extends State<DownloaderDashboardPage> {
               children: <Widget>[
                 Expanded(
                   child: TextField(
+                    key: const ValueKey<String>('download-filename-field'),
                     controller: _fileNameController,
                     decoration: const InputDecoration(
                       labelText: 'File Name (Optional)',
@@ -670,6 +711,7 @@ class _DownloaderDashboardPageState extends State<DownloaderDashboardPage> {
                   onSelected: (v) => setState(() => _requiresUnmetered = v),
                 ),
                 FilledButton.icon(
+                  key: const ValueKey<String>('enqueue-task-button'),
                   onPressed: _enqueueCustomTask,
                   icon: const Icon(Icons.download),
                   label: const Text('Enqueue Task'),
@@ -737,6 +779,7 @@ class _DownloaderDashboardPageState extends State<DownloaderDashboardPage> {
                 Chip(
                   label: Text(
                     '${task.status.name.toUpperCase()} • ${task.priority.name}',
+                    key: ValueKey<String>('status-${task.fileName}'),
                     style: const TextStyle(fontSize: 11),
                   ),
                   visualDensity: VisualDensity.compact,
@@ -763,6 +806,7 @@ class _DownloaderDashboardPageState extends State<DownloaderDashboardPage> {
               children: <Widget>[
                 Text(
                   'Progress: ${pct.toStringAsFixed(1)}% (${_formatBytes(task.downloadedBytes)} / ${task.totalBytes > 0 ? _formatBytes(task.totalBytes) : "?"})',
+                  key: ValueKey<String>('progress-${task.fileName}'),
                 ),
                 if (task.status == DownloadStatus.running)
                   Text('Speed: ${_formatBytes(task.bytesPerSecond.round())}/s'),
@@ -790,12 +834,14 @@ class _DownloaderDashboardPageState extends State<DownloaderDashboardPage> {
                 if (task.status == DownloadStatus.running ||
                     task.status == DownloadStatus.queued)
                   TextButton.icon(
+                    key: ValueKey<String>('pause-${task.fileName}'),
                     onPressed: () => _downloader.pause(task.taskId),
                     icon: const Icon(Icons.pause, size: 18),
                     label: const Text('Pause'),
                   ),
                 if (task.status == DownloadStatus.paused)
                   TextButton.icon(
+                    key: ValueKey<String>('resume-${task.fileName}'),
                     onPressed: () => _downloader.resume(task.taskId),
                     icon: const Icon(Icons.play_arrow, size: 18),
                     label: const Text('Resume'),
@@ -810,6 +856,7 @@ class _DownloaderDashboardPageState extends State<DownloaderDashboardPage> {
                 if (task.status.isActive ||
                     task.status == DownloadStatus.paused)
                   TextButton.icon(
+                    key: ValueKey<String>('cancel-${task.fileName}'),
                     onPressed: () => _downloader.cancel(task.taskId),
                     icon: const Icon(Icons.stop, size: 18),
                     label: const Text('Cancel'),
@@ -859,6 +906,7 @@ class _StatBadge extends StatelessWidget {
       ),
       child: Text(
         '$label: $count',
+        key: ValueKey<String>('stat-${label.toLowerCase()}'),
         style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
       ),
     );
