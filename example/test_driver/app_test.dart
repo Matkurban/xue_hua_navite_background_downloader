@@ -74,28 +74,19 @@ void main() {
       print('STEP group filter');
       // The filename field keeps the same string, so match the task chip.
       await _tap(driver, 'group-filter-custom');
-      expect(
-        await driver.getText(find.byValueKey('active-group-filter')),
-        'Group: custom',
-      );
+      await _expectKeyText(driver, 'active-group-filter', 'Group: custom');
       await driver.waitFor(
         find.byValueKey('status-$smallFile'),
         timeout: const Duration(seconds: 10),
       );
       await _tap(driver, 'group-filter-batch');
-      expect(
-        await driver.getText(find.byValueKey('active-group-filter')),
-        'Group: batch_demo',
-      );
+      await _expectKeyText(driver, 'active-group-filter', 'Group: batch_demo');
       await driver.waitForAbsent(
         find.byValueKey('status-$smallFile'),
         timeout: const Duration(seconds: 10),
       );
       await _tap(driver, 'group-filter-all');
-      expect(
-        await driver.getText(find.byValueKey('active-group-filter')),
-        'Group: all',
-      );
+      await _expectKeyText(driver, 'active-group-filter', 'Group: all');
       await driver.waitFor(
         find.byValueKey('status-$smallFile'),
         timeout: const Duration(seconds: 10),
@@ -115,10 +106,7 @@ void main() {
       await _tap(driver, 'enqueue-task-button');
       await _waitStatus(driver, queuedFile, _isQueued);
       expect(await _status(driver, holdFile), contains('RUNNING'));
-      expect(
-        await driver.getText(find.byValueKey('stat-running')),
-        'Running: 1',
-      );
+      await _expectKeyText(driver, 'stat-running', 'Running: 1');
 
       // ignore: avoid_print
       print('STEP pause resume');
@@ -167,7 +155,14 @@ void main() {
       print('STEP cancel all');
       await _tap(driver, 'cancel-all-button');
       await _waitStatus(driver, holdFile, _isCanceled);
-      await _waitStatus(driver, queuedFile, _isCanceled);
+      // Pausing the hold task frees its slot once the worker exits, so this
+      // file may run and finish on a fast link before Cancel All. Either
+      // terminal state is valid; do not require downloaded bytes.
+      await _waitStatus(
+        driver,
+        queuedFile,
+        (text) => _isCanceled(text) || _isCompleted(text),
+      );
     });
   }, timeout: const Timeout(Duration(minutes: 6)));
 }
@@ -203,24 +198,38 @@ Future<void> _revealInTaskPane(
   FlutterDriver driver,
   SerializableFinder item,
 ) async {
-  try {
-    await driver.waitFor(item, timeout: const Duration(seconds: 2));
-    await driver.scrollIntoView(item, timeout: const Duration(seconds: 5));
-    return;
-  } catch (_) {
-    // The tile is below the fold of the lazy task list.
-  }
-  await driver.scrollUntilVisible(
-    find.byValueKey('task-pane'),
-    item,
-    dyScroll: -160,
-    timeout: const Duration(seconds: 20),
-  );
+  // The task pane builds every tile, so ensureVisible can reach a row that
+  // is below the current scroll offset on either desktop host.
+  await driver.scrollIntoView(item, timeout: const Duration(seconds: 10));
 }
 
 Future<void> _setField(FlutterDriver driver, String key, String value) async {
   await _tap(driver, key);
   await driver.enterText(value, timeout: _kTapTimeout);
+}
+
+Future<void> _expectKeyText(
+  FlutterDriver driver,
+  String key,
+  String exact, {
+  Duration timeout = const Duration(seconds: 10),
+}) async {
+  final finder = find.byValueKey(key);
+  final end = DateTime.now().add(timeout);
+  var last = '';
+  Object? lastError;
+  while (DateTime.now().isBefore(end)) {
+    try {
+      last = await driver.getText(finder);
+      if (last == exact) {
+        return;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+  }
+  fail('Text for $key stayed "$last" ($lastError); expected "$exact"');
 }
 
 Future<void> _expectBanner(

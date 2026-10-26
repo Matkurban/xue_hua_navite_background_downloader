@@ -48,26 +48,51 @@ case "${uname_s}" in
     ;;
 esac
 
-download_dir() {
+# The plugin stores tasks in Downloads/XueHuaDownloads, or in the temp
+# directory when the OS has no Downloads folder. Clear every candidate so a
+# previous run cannot restore a queue into the driver.
+clean_download_dirs() {
+  local dirs=()
   if [[ -n "${XUEHUA_DOWNLOAD_DIR:-}" ]]; then
-    printf '%s\n' "${XUEHUA_DOWNLOAD_DIR}"
-    return
+    dirs+=("${XUEHUA_DOWNLOAD_DIR}")
+  else
+    case "${uname_s}" in
+      Linux)
+        dirs+=(
+          "${XDG_DOWNLOAD_DIR:-${HOME}/Downloads}/XueHuaDownloads"
+          "${TMPDIR:-/tmp}/XueHuaDownloads"
+          "/tmp/XueHuaDownloads"
+        )
+        if command -v xdg-user-dir >/dev/null 2>&1; then
+          local xdg
+          xdg="$(xdg-user-dir DOWNLOAD 2>/dev/null || true)"
+          if [[ -n "${xdg}" && "${xdg}" != "${HOME}" ]]; then
+            dirs+=("${xdg}/XueHuaDownloads")
+          fi
+        fi
+        ;;
+      Darwin)
+        dirs+=(
+          "${HOME}/Downloads/XueHuaDownloads"
+          "${TMPDIR:-/tmp}/XueHuaDownloads"
+        )
+        ;;
+      MINGW*|MSYS*|CYGWIN*)
+        local base="${USERPROFILE:-${HOME}}"
+        local temp="${TEMP:-${TMP:-/tmp}}"
+        if command -v cygpath >/dev/null 2>&1; then
+          base="$(cygpath -u "${base}")"
+          temp="$(cygpath -u "${temp}")"
+        fi
+        dirs+=("${base}/Downloads/XueHuaDownloads" "${temp}/XueHuaDownloads")
+        ;;
+    esac
   fi
-  case "${uname_s}" in
-    Linux)
-      printf '%s\n' "${XDG_DOWNLOAD_DIR:-${HOME}/Downloads}/XueHuaDownloads"
-      ;;
-    Darwin)
-      printf '%s\n' "${HOME}/Downloads/XueHuaDownloads"
-      ;;
-    MINGW*|MSYS*|CYGWIN*)
-      local base="${USERPROFILE:-${HOME}}"
-      if command -v cygpath >/dev/null 2>&1; then
-        base="$(cygpath -u "${base}")"
-      fi
-      printf '%s\n' "${base}/Downloads/XueHuaDownloads"
-      ;;
-  esac
+  local dir
+  for dir in "${dirs[@]}"; do
+    mkdir -p "${dir}"
+    find "${dir}" -maxdepth 1 -type f -delete
+  done
 }
 
 run_gui() {
@@ -106,10 +131,7 @@ for f in "${files[@]}"; do
 done
 
 echo "== flutter_driver example UI =="
-DOWNLOAD_DIR="$(download_dir)"
-mkdir -p "${DOWNLOAD_DIR}"
-# Drop persisted tasks and demo outputs so preset filenames stay stable.
-find "${DOWNLOAD_DIR}" -maxdepth 1 -type f -delete
+clean_download_dirs
 (cd "${EXAMPLE_DIR}" && run_gui "${FLUTTER}" drive \
   --driver=test_driver/app_test.dart \
   --target=test_driver/app.dart \

@@ -22,7 +22,7 @@ The same driver and integration tests run on Linux and Windows. Finders use `Val
 
 `flutter test integration_test/` starts the desktop app once per `*_test.dart` inside one tool process. The second file often fails with `Unable to start the app`. Run each file in its own process. `example/tool/run_desktop_tests.sh` does that on Linux (under Xvfb), macOS, and Windows Git Bash. On Windows PowerShell use `example/tool/run_desktop_tests.ps1`. `example/tool/run_linux_tests.sh` is a wrapper around the shell script.
 
-Linux needs `libcurl`, `notify-send`, and `xvfb`. Windows uses the WinHTTP engine already built with the plugin. Set `FLUTTER_BIN` when `flutter` is not on `PATH`. Set `XUEHUA_DOWNLOAD_DIR` when the plugin's download folder is not the OS Downloads directory plus `XueHuaDownloads`.
+Linux needs `libcurl`, `notify-send`, and `xvfb`. Windows uses the WinHTTP engine already built with the plugin. Set `FLUTTER_BIN` when `flutter` is not on `PATH`. The runners clear `Downloads/XueHuaDownloads` and the temp `XueHuaDownloads` folder before the driver, because the plugin falls back to the temp directory when the OS has no Downloads folder. Set `XUEHUA_DOWNLOAD_DIR` to clean a different folder instead.
 
 ```bash
 example/tool/run_desktop_tests.sh

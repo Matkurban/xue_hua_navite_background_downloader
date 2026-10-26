@@ -61,13 +61,20 @@ foreach ($file in $files) {
 }
 
 Write-Host '== flutter_driver example UI =='
+# Clear Downloads and TEMP. The plugin uses TEMP when the OS has no Downloads folder.
+$DownloadDirs = @()
 if ($env:XUEHUA_DOWNLOAD_DIR) {
-  $DownloadDir = $env:XUEHUA_DOWNLOAD_DIR
+  $DownloadDirs += $env:XUEHUA_DOWNLOAD_DIR
 } else {
-  $DownloadDir = Join-Path $env:USERPROFILE 'Downloads\XueHuaDownloads'
+  $DownloadDirs += (Join-Path $env:USERPROFILE 'Downloads\XueHuaDownloads')
+  if ($env:TEMP) {
+    $DownloadDirs += (Join-Path $env:TEMP 'XueHuaDownloads')
+  }
 }
-New-Item -ItemType Directory -Force -Path $DownloadDir | Out-Null
-Get-ChildItem -Path $DownloadDir -File -ErrorAction SilentlyContinue | Remove-Item -Force
+foreach ($DownloadDir in $DownloadDirs) {
+  New-Item -ItemType Directory -Force -Path $DownloadDir | Out-Null
+  Get-ChildItem -Path $DownloadDir -File -ErrorAction SilentlyContinue | Remove-Item -Force
+}
 Invoke-Flutter -WorkingDirectory $ExampleDir drive `
   --driver=test_driver/app_test.dart `
   --target=test_driver/app.dart `

@@ -1,3 +1,10 @@
+## 1.0.5
+
+* Linux: apply `skip` and `fail` when the destination already exists, compare checksums without case sensitivity, send per-request headers and `defaultHeaders`, and honor `notificationConfig.enabled` plus `title`. HTTP status failures are reported as `http_error` with the status code. Connect timeout, low-speed abort, and `CURLOPT_NOSIGNAL` are set on the transfer.
+* Linux and Windows: a task keeps its concurrency slot until the worker exits, so pause or resume does not start a second writer on the same partial file. A worker that finishes after the task leaves `running` does not mark it completed or failed. Windows progress events after pause are ignored.
+* Example: `flutter_driver` drives configure, enqueue, group filters, the queue, pause, resume, batch, and cancel. Keys are the same on Linux and Windows. Integration coverage adds skip/fail, checksum, custom headers, HTTP 404, and `getAllTasks`. Use `example/tool/run_desktop_tests.sh` or `example/tool/run_desktop_tests.ps1`, which runs each integration file in its own process.
+* Windows native googletest stays disabled with `if(FALSE)` so the MAX_PATH guard is unchanged.
+
 ## 1.0.4
 
 * Windows: fix CMake configure error (`if(FALSE AND)` / unknown arguments) when the native googletest block stays disabled for MAX_PATH. The block remains off; re-enable with `if(${include_${PROJECT_NAME}_tests})` once paths allow.

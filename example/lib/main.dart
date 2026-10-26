@@ -382,10 +382,13 @@ class _DownloaderDashboardPageState extends State<DownloaderDashboardPage> {
           ),
           const VerticalDivider(width: 1),
           Expanded(
-            child: ListView(
+            child: SingleChildScrollView(
               key: const ValueKey<String>('task-pane'),
               padding: const EdgeInsets.all(16),
-              children: taskPane,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: taskPane,
+              ),
             ),
           ),
         ],
