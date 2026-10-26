@@ -1,3 +1,9 @@
+## 1.0.6
+
+* Windows: deliver EventChannel task updates on the platform thread. Progress, completion, and the running transition scheduled when a worker exits were sent from the download thread, so Flutter logged `events` as a non-platform-thread channel and could drop the update. Pause, resume, cancel, and progress still emit the same payloads. Linux continues to marshal with `g_idle_add`.
+* Example: `run_desktop_tests.ps1` passes `--device-id=windows` inside an argument array. PowerShell was binding `-d` to `-Debug`, so the script did not target Windows.
+* Example: document a short checkout or `C:\bgdl` junction. Long `StudioProjects` paths still overflow MSBuild `.tlog` `MAX_PATH`. Windows native googletest stays `if(FALSE)`.
+
 ## 1.0.5
 
 * Linux: apply `skip` and `fail` when the destination already exists, compare checksums without case sensitivity, send per-request headers and `defaultHeaders`, and honor `notificationConfig.enabled` plus `title`. HTTP status failures are reported as `http_error` with the status code. Connect timeout, low-speed abort, and `CURLOPT_NOSIGNAL` are set on the transfer.

@@ -7,6 +7,14 @@
 #include <flutter/plugin_registrar_windows.h>
 #include <flutter/standard_method_codec.h>
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -110,6 +118,13 @@ class XueHuaNaviteBackgroundDownloaderPlugin : public flutter::Plugin {
   void RunDownloadWorker(std::string task_id,
                          std::shared_ptr<std::atomic<bool>> stop_flag);
   void EmitTaskUpdate(const TaskRecord& record);
+  void StartEventDispatcher();
+  void StopEventDispatcher();
+  void FlushTaskUpdates();
+  static LRESULT CALLBACK EventDispatcherWndProc(HWND hwnd,
+                                                 UINT message,
+                                                 WPARAM wparam,
+                                                 LPARAM lparam);
   void ShowSystemNotification(const TaskRecord& record);
 
   void PersistTasksLocked();
@@ -120,6 +135,16 @@ class XueHuaNaviteBackgroundDownloaderPlugin : public flutter::Plugin {
   mutable std::mutex state_mutex_;
   std::mutex sink_mutex_;
   std::unique_ptr<flutter::EventSink<flutter::EncodableValue>> event_sink_;
+
+  // EventChannel sends must run on the Flutter platform thread. Download
+  // workers queue encoded updates here and wake this message-only window,
+  // which is created on the platform thread. Flutter 3.47 exposes
+  // PostPlatformThreadTask on the engine only, not on PluginRegistrarWindows.
+  HWND event_hwnd_ = nullptr;
+  std::mutex event_queue_mutex_;
+  std::vector<flutter::EncodableValue> pending_events_;
+  bool event_dispatch_posted_ = false;
+  bool dispatcher_alive_ = false;
 
   int max_concurrent_tasks_ = 3;
   int connect_timeout_ms_ = 15000;

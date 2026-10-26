@@ -33,6 +33,7 @@ target_link_libraries(${PLUGIN_NAME} PRIVATE
   bcrypt
   shell32
   ole32
+  user32
 )
 
 set(xue_hua_navite_background_downloader_bundled_libraries
@@ -76,6 +77,7 @@ target_link_libraries(${TEST_RUNNER} PRIVATE
   bcrypt
   shell32
   ole32
+  user32
   gtest_main
   gmock
 )
