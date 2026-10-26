@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -145,6 +146,29 @@ bool GetFlBool(FlValue* map, const char* key, bool fallback = false) {
   return fallback;
 }
 
+std::string AsciiLower(std::string value) {
+  for (char& ch : value) {
+    ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+  }
+  return value;
+}
+
+void ReadFlStringMap(FlValue* map, const char* key,
+                     std::map<std::string, std::string>* out) {
+  if (!map || !out || fl_value_get_type(map) != FL_VALUE_TYPE_MAP) return;
+  FlValue* child = fl_value_lookup_string(map, key);
+  if (!child || fl_value_get_type(child) != FL_VALUE_TYPE_MAP) return;
+  const size_t count = fl_value_get_length(child);
+  for (size_t i = 0; i < count; ++i) {
+    FlValue* map_key = fl_value_get_map_key(child, i);
+    FlValue* map_value = fl_value_get_map_value(child, i);
+    if (!map_key || !map_value) continue;
+    if (fl_value_get_type(map_key) != FL_VALUE_TYPE_STRING) continue;
+    if (fl_value_get_type(map_value) != FL_VALUE_TYPE_STRING) continue;
+    (*out)[fl_value_get_string(map_key)] = fl_value_get_string(map_value);
+  }
+}
+
 int64_t GetFlInt(FlValue* map, const char* key, int64_t fallback = 0) {
   if (!map || fl_value_get_type(map) != FL_VALUE_TYPE_MAP) return fallback;
   FlValue* v = fl_value_lookup_string(map, key);
@@ -245,7 +269,11 @@ struct LinuxTaskRecord {
       } else {
         fl_value_set_string_take(err, "httpStatusCode", fl_value_new_null());
       }
-      fl_value_set_string_take(err, "isRecoverable", fl_value_new_bool(true));
+      const bool recoverable = error_code != "checksum_mismatch" &&
+                               error_code != "file_exists" &&
+                               error_code != "invalid_url";
+      fl_value_set_string_take(err, "isRecoverable",
+                               fl_value_new_bool(recoverable));
       fl_value_set_string_take(m, "error", err);
     } else {
       fl_value_set_string_take(m, "error", fl_value_new_null());
@@ -346,6 +374,8 @@ class LinuxDownloaderEngine {
         user_agent_ = GetFlString(args, "userAgent",
                                   "XueHuaNativeBackgroundDownloader/1.0.0");
         auto_resume_ = GetFlBool(args, "autoResumeOnStartup", false);
+        default_headers_.clear();
+        ReadFlStringMap(args, "defaultHeaders", &default_headers_);
       }
       ScheduleQueueLocked();
       g_autoptr(FlValue) null_val = fl_value_new_null();
@@ -587,6 +617,15 @@ class LinuxDownloaderEngine {
     rec.expected_checksum = GetFlString(args, "expectedChecksum", "");
     rec.checksum_algorithm =
         GetFlString(args, "checksumAlgorithm", "sha256");
+    rec.headers = default_headers_;
+    ReadFlStringMap(args, "headers", &rec.headers);
+    ReadFlStringMap(args, "metadata", &rec.metadata);
+    FlValue* notify =
+        args ? fl_value_lookup_string(args, "notificationConfig") : nullptr;
+    if (notify && fl_value_get_type(notify) == FL_VALUE_TYPE_MAP) {
+      rec.notify_enabled = GetFlBool(notify, "enabled", true);
+      rec.notify_title = GetFlString(notify, "title", "");
+    }
     rec.created_at_ms = NowMs();
     rec.updated_at_ms = rec.created_at_ms;
 
@@ -604,7 +643,6 @@ class LinuxDownloaderEngine {
     auto st = active_stops_.find(id);
     if (st != active_stops_.end()) {
       st->second->store(true);
-      active_stops_.erase(st);
     }
     r.status = "paused";
     r.bytes_per_second = 0.0;
@@ -637,10 +675,10 @@ class LinuxDownloaderEngine {
     auto it = tasks_.find(id);
     if (it == tasks_.end()) return nullptr;
     auto& r = it->second;
+    if (r.status == "completed" || r.status == "canceled") return &r;
     auto st = active_stops_.find(id);
     if (st != active_stops_.end()) {
       st->second->store(true);
-      active_stops_.erase(st);
     }
     if (del_partial) {
       std::error_code ec;
@@ -674,8 +712,8 @@ class LinuxDownloaderEngine {
   bool RemoveLocked(const std::string& id, bool del_file) {
     auto st = active_stops_.find(id);
     if (st != active_stops_.end()) {
+      // Keep the slot until the worker observes the flag and exits.
       st->second->store(true);
-      active_stops_.erase(st);
     }
     auto it = tasks_.find(id);
     if (it == tasks_.end()) return false;
@@ -723,12 +761,18 @@ class LinuxDownloaderEngine {
                  std::shared_ptr<std::atomic<bool>> stop_flag) {
     LinuxTaskRecord snap;
     int64_t interval_ms = 250;
+    int connect_ms = connect_timeout_ms_;
+    int read_ms = read_timeout_ms_;
+    std::string user_agent = user_agent_;
     {
       std::lock_guard<std::mutex> lock(mu_);
       auto it = tasks_.find(task_id);
       if (it == tasks_.end()) return;
       snap = it->second;
       interval_ms = progress_interval_ms_;
+      connect_ms = connect_timeout_ms_;
+      read_ms = read_timeout_ms_;
+      user_agent = user_agent_;
     }
 
     fs::path dest_path(snap.save_path);
@@ -736,13 +780,43 @@ class LinuxDownloaderEngine {
     std::error_code ec;
     fs::create_directories(dest_path.parent_path(), ec);
 
+    if (fs::exists(dest_path, ec)) {
+      if (snap.conflict_resolution == "skip" ||
+          snap.conflict_resolution == "fail") {
+        std::lock_guard<std::mutex> lock(mu_);
+        auto it = tasks_.find(task_id);
+        if (it != tasks_.end()) {
+          if (snap.conflict_resolution == "skip") {
+            const int64_t size = static_cast<int64_t>(fs::file_size(dest_path, ec));
+            it->second.downloaded_bytes = size;
+            it->second.total_bytes = size;
+            it->second.progress = 1.0;
+            it->second.status = "completed";
+            it->second.completed_at_ms = NowMs();
+          } else {
+            it->second.status = "failed";
+            it->second.error_code = "file_exists";
+            it->second.error_message = "Destination file already exists";
+          }
+          it->second.updated_at_ms = NowMs();
+          PersistLocked();
+          EmitEventOnMain(it->second);
+          SendDesktopNotificationLocked(it->second);
+        }
+        active_stops_.erase(task_id);
+        ScheduleQueueLocked();
+        return;
+      }
+    }
+
     int64_t offset =
         (snap.allow_pause && fs::exists(part_path, ec))
             ? static_cast<int64_t>(fs::file_size(part_path, ec))
             : 0;
 
     bool ok = false;
-    int http_code = 200;
+    int http_code = 0;
+    std::string err_code = "network_error";
     std::string err_msg;
 
 #if defined(HAVE_LIBCURL)
@@ -766,9 +840,29 @@ class LinuxDownloaderEngine {
 
       curl_easy_setopt(curl, CURLOPT_URL, snap.url.c_str());
       curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-      curl_easy_setopt(curl, CURLOPT_USERAGENT, user_agent_.c_str());
+      curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+      curl_easy_setopt(curl, CURLOPT_USERAGENT, user_agent.c_str());
       curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS,
-                       static_cast<long>(connect_timeout_ms_));
+                       static_cast<long>(connect_ms));
+      curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
+      curl_easy_setopt(
+          curl, CURLOPT_LOW_SPEED_TIME,
+          static_cast<long>(std::max(1, read_ms / 1000)));
+      curl_slist* header_list = nullptr;
+      for (const auto& kv : snap.headers) {
+        if (AsciiLower(kv.first) == "user-agent") continue;
+        const std::string line = kv.first + ": " + kv.second;
+        header_list = curl_slist_append(header_list, line.c_str());
+      }
+      if (header_list) {
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
+      }
+      if (snap.method == "POST") {
+        curl_easy_setopt(curl, CURLOPT_POST, 1L);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, snap.post_body.c_str());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE,
+                         static_cast<long>(snap.post_body.size()));
+      }
       if (offset > 0) {
         curl_easy_setopt(curl, CURLOPT_RESUME_FROM_LARGE,
                          static_cast<curl_off_t>(offset));
@@ -821,8 +915,18 @@ class LinuxDownloaderEngine {
       long code = 0;
       curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
       http_code = static_cast<int>(code);
-      ok = (res == CURLE_OK && http_code >= 200 && http_code < 300);
-      if (!ok) err_msg = curl_easy_strerror(res);
+      if (res != CURLE_OK) {
+        ok = false;
+        err_code = "network_error";
+        err_msg = curl_easy_strerror(res);
+      } else if (http_code < 200 || http_code >= 300) {
+        ok = false;
+        err_code = "http_error";
+        err_msg = "HTTP status " + std::to_string(http_code);
+      } else {
+        ok = true;
+      }
+      curl_slist_free_all(header_list);
       curl_easy_cleanup(curl);
       ofs.close();
     }
@@ -845,13 +949,18 @@ class LinuxDownloaderEngine {
 
     std::lock_guard<std::mutex> lock(mu_);
     auto it = tasks_.find(task_id);
+    if (it == tasks_.end() || it->second.status != "running") {
+      active_stops_.erase(task_id);
+      ScheduleQueueLocked();
+      return;
+    }
     if (it != tasks_.end()) {
       if (ok) {
         if (!snap.expected_checksum.empty()) {
           std::string computed =
               ComputeFileChecksumGlib(part_path, snap.checksum_algorithm);
           it->second.computed_checksum = computed;
-          if (computed != snap.expected_checksum) {
+          if (computed != AsciiLower(snap.expected_checksum)) {
             fs::remove(part_path, ec);
             it->second.status = "failed";
             it->second.error_code = "checksum_mismatch";
@@ -881,7 +990,7 @@ class LinuxDownloaderEngine {
         it->second.completed_at_ms = it->second.updated_at_ms;
       } else {
         it->second.status = "failed";
-        it->second.error_code = "network_error";
+        it->second.error_code = err_code;
         it->second.error_message = err_msg;
         it->second.http_status_code = http_code;
         it->second.updated_at_ms = NowMs();
@@ -990,6 +1099,7 @@ class LinuxDownloaderEngine {
   int64_t progress_interval_ms_ = 250;
   bool enable_notifications_ = true;
   std::string user_agent_ = "XueHuaNativeBackgroundDownloader/1.0.0";
+  std::map<std::string, std::string> default_headers_;
   bool auto_resume_ = false;
   std::map<std::string, LinuxTaskRecord> tasks_;
   std::map<std::string, std::shared_ptr<std::atomic<bool>>> active_stops_;

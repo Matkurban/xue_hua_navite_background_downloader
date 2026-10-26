@@ -16,24 +16,36 @@ For help getting started with Flutter development, view the
 [online documentation](https://docs.flutter.dev/), which offers tutorials,
 samples, guidance on mobile development, and a full API reference.
 
-## Linux tests
+## Desktop tests
 
-From the repository root, with `libcurl` and `xvfb` installed:
+The same driver and integration tests run on Linux and Windows. Finders use `ValueKey` strings, and file paths come from `Directory.systemTemp`, `Platform.pathSeparator`, or the plugin's `defaultDownloadDirectory`. Nothing in the Dart tests hardcodes a host path.
+
+`flutter test integration_test/` starts the desktop app once per `*_test.dart` inside one tool process. The second file often fails with `Unable to start the app`. Run each file in its own process. `example/tool/run_desktop_tests.sh` does that on Linux (under Xvfb), macOS, and Windows Git Bash. On Windows PowerShell use `example/tool/run_desktop_tests.ps1`. `example/tool/run_linux_tests.sh` is a wrapper around the shell script.
+
+Linux needs `libcurl`, `notify-send`, and `xvfb`. Windows uses the WinHTTP engine already built with the plugin. Set `FLUTTER_BIN` when `flutter` is not on `PATH`. Set `XUEHUA_DOWNLOAD_DIR` when the plugin's download folder is not the OS Downloads directory plus `XueHuaDownloads`.
 
 ```bash
-example/tool/run_linux_tests.sh
+example/tool/run_desktop_tests.sh
 ```
 
-The script builds the example for Linux, runs the plugin and widget tests, then runs each `integration_test/*_test.dart` in its own process. A single `flutter test integration_test/` invocation reuses the desktop device and often fails on the second file with `Unable to start the app`. One file is safe either way; extra files should go through the script.
+```powershell
+pwsh example/tool/run_desktop_tests.ps1
+```
 
-UI coverage uses `flutter_driver` (`example/test_driver/app.dart` enables the extension; `example/test_driver/app_test.dart` is the host script):
+UI coverage uses `flutter_driver` (`example/test_driver/app.dart` enables the extension; `example/test_driver/app_test.dart` is the host script). From `example/`:
 
 ```bash
-cd example
-xvfb-run -a flutter drive \
+flutter drive \
   --driver=test_driver/app_test.dart \
   --target=test_driver/app.dart \
   -d linux
 ```
 
-That drive configures `maxConcurrentTasks`, enqueues a small download to completion, filters groups, holds a queue with a large OVH file, and exercises pause, resume, batch, and cancel. Cancel checks the canceled state only — a fast link can cancel before any bytes land.
+```powershell
+flutter drive `
+  --driver=test_driver/app_test.dart `
+  --target=test_driver/app.dart `
+  -d windows
+```
+
+On Linux without a display, prefix the drive command with `xvfb-run -a`. The drive configures `maxConcurrentTasks`, turns notifications off, enqueues a small download to completion, filters groups, holds a queue with a large OVH file, and exercises pause, resume, batch, and cancel. Cancel checks the canceled state only. A fast link can cancel before any bytes land.

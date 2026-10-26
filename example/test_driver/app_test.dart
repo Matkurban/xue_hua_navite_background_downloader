@@ -34,11 +34,15 @@ void main() {
 
   test('dashboard configures, downloads, and controls the queue', () async {
     await driver.runUnsynchronized(() async {
+      // ignore: avoid_print
+      print('STEP ready');
       await _expectBanner(
         driver,
         'Ready on',
         timeout: const Duration(seconds: 45),
       );
+      await _tap(driver, 'notifications-switch');
+      await _expectBanner(driver, 'notifications=false');
 
       await _tap(driver, 'concurrency-dec');
       await _expectBanner(driver, 'maxConcurrentTasks=2');
@@ -49,6 +53,8 @@ void main() {
       await _tap(driver, 'concurrency-dec');
       await _expectBanner(driver, 'maxConcurrentTasks=1');
 
+      // ignore: avoid_print
+      print('STEP enqueue small');
       await _setField(driver, 'download-filename-field', smallFile);
       await _setField(driver, 'download-url-field', smallUrl);
       await _tap(driver, 'enqueue-task-button');
@@ -64,26 +70,47 @@ void main() {
         timeout: const Duration(seconds: 20),
       );
 
-      await driver.scrollIntoView(find.text('Custom'));
-      await driver.tap(find.text('Custom'));
-      await driver.waitFor(find.text(smallFile));
-      await driver.scrollIntoView(find.text('Batch'));
-      await driver.tap(find.text('Batch'));
-      await driver.waitForAbsent(find.text(smallFile));
-      await driver.scrollIntoView(find.text('All'));
-      await driver.tap(find.text('All'));
-      await driver.waitFor(find.text(smallFile));
+      // ignore: avoid_print
+      print('STEP group filter');
+      // The filename field keeps the same string, so match the task chip.
+      await _tap(driver, 'group-filter-custom');
+      expect(
+        await driver.getText(find.byValueKey('active-group-filter')),
+        'Group: custom',
+      );
+      await driver.waitFor(
+        find.byValueKey('status-$smallFile'),
+        timeout: const Duration(seconds: 10),
+      );
+      await _tap(driver, 'group-filter-batch');
+      expect(
+        await driver.getText(find.byValueKey('active-group-filter')),
+        'Group: batch_demo',
+      );
+      await driver.waitForAbsent(
+        find.byValueKey('status-$smallFile'),
+        timeout: const Duration(seconds: 10),
+      );
+      await _tap(driver, 'group-filter-all');
+      expect(
+        await driver.getText(find.byValueKey('active-group-filter')),
+        'Group: all',
+      );
+      await driver.waitFor(
+        find.byValueKey('status-$smallFile'),
+        timeout: const Duration(seconds: 10),
+      );
 
+      // ignore: avoid_print
+      print('STEP hold download');
       await _setField(driver, 'download-filename-field', holdFile);
       await _setField(driver, 'download-url-field', holdUrl);
       await _tap(driver, 'enqueue-task-button');
       await _waitStatus(driver, holdFile, _isRunning);
-      final pausedAt = await _waitProgress(
-        driver,
-        holdFile,
-        (text) => !text.contains('(0 B'),
-      );
+      await _waitProgress(driver, holdFile, (text) => !text.contains('(0 B'));
 
+      // ignore: avoid_print
+      print('STEP queued download');
       await _setField(driver, 'download-filename-field', queuedFile);
       await _tap(driver, 'enqueue-task-button');
       await _waitStatus(driver, queuedFile, _isQueued);
@@ -93,8 +120,12 @@ void main() {
         'Running: 1',
       );
 
+      // ignore: avoid_print
+      print('STEP pause resume');
       await _tap(driver, 'pause-$holdFile');
       await _waitStatus(driver, holdFile, _isPaused);
+      final pausedAt = await _progress(driver, holdFile);
+      expect(pausedAt.contains('(0 B'), isFalse);
       await Future<void>.delayed(const Duration(milliseconds: 600));
       expect(await _progress(driver, holdFile), pausedAt);
 
@@ -106,6 +137,8 @@ void main() {
       );
       await _waitStatus(driver, holdFile, _isRunning);
 
+      // ignore: avoid_print
+      print('STEP batch');
       await _tap(driver, 'enqueue-batch-button');
       await driver.waitFor(
         find.text('ovh_test_10mb.dat'),
@@ -130,24 +163,64 @@ void main() {
         timeout: const Duration(seconds: 40),
       );
 
+      // ignore: avoid_print
+      print('STEP cancel all');
       await _tap(driver, 'cancel-all-button');
       await _waitStatus(driver, holdFile, _isCanceled);
       await _waitStatus(driver, queuedFile, _isCanceled);
     });
-  }, timeout: const Timeout(Duration(minutes: 4)));
+  }, timeout: const Timeout(Duration(minutes: 6)));
 }
+
+const _kTapTimeout = Duration(seconds: 15);
 
 Future<void> _tap(FlutterDriver driver, String key) async {
   final finder = find.byValueKey(key);
-  await driver.scrollIntoView(finder);
-  await driver.tap(finder);
+  if (_isTaskRowKey(key)) {
+    await _revealInTaskPane(driver, finder);
+  }
+  await driver.waitFor(finder, timeout: _kTapTimeout);
+  await driver.tap(finder, timeout: _kTapTimeout);
+}
+
+bool _isTaskRowKey(String key) {
+  if (key.endsWith('-button') ||
+      key.endsWith('-field') ||
+      key.endsWith('-switch')) {
+    return false;
+  }
+  return key.startsWith('pause-') ||
+      key.startsWith('resume-') ||
+      key.startsWith('cancel-') ||
+      key.startsWith('status-') ||
+      key.startsWith('progress-');
+}
+
+/// Brings a task-row widget into the task list. Keys are the same on Linux
+/// and Windows; the list itself is the scrollable, so this does not depend
+/// on a host path or a single-column layout.
+Future<void> _revealInTaskPane(
+  FlutterDriver driver,
+  SerializableFinder item,
+) async {
+  try {
+    await driver.waitFor(item, timeout: const Duration(seconds: 2));
+    await driver.scrollIntoView(item, timeout: const Duration(seconds: 5));
+    return;
+  } catch (_) {
+    // The tile is below the fold of the lazy task list.
+  }
+  await driver.scrollUntilVisible(
+    find.byValueKey('task-pane'),
+    item,
+    dyScroll: -160,
+    timeout: const Duration(seconds: 20),
+  );
 }
 
 Future<void> _setField(FlutterDriver driver, String key, String value) async {
-  final finder = find.byValueKey(key);
-  await driver.scrollIntoView(finder);
-  await driver.tap(finder);
-  await driver.enterText(value);
+  await _tap(driver, key);
+  await driver.enterText(value, timeout: _kTapTimeout);
 }
 
 Future<void> _expectBanner(
@@ -188,7 +261,7 @@ Future<String> _waitStatus(
   var last = '';
   while (DateTime.now().isBefore(end)) {
     try {
-      await driver.waitFor(finder, timeout: const Duration(seconds: 2));
+      await _revealInTaskPane(driver, finder);
       last = await driver.getText(finder);
       if (predicate(last)) {
         return last;
@@ -212,7 +285,7 @@ Future<String> _waitProgress(
   var last = '';
   while (DateTime.now().isBefore(end)) {
     try {
-      await driver.waitFor(finder, timeout: const Duration(seconds: 2));
+      await _revealInTaskPane(driver, finder);
       last = await driver.getText(finder);
       if (predicate(last)) {
         return last;
