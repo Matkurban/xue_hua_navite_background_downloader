@@ -28,6 +28,11 @@ TEST(XueHuaNaviteBackgroundDownloaderPlugin, GetCapabilities) {
   auto it = result_map.find(flutter::EncodableValue("platform"));
   ASSERT_NE(it, result_map.end());
   EXPECT_EQ(std::get<std::string>(it->second), "windows");
+
+  auto store = result_map.find(flutter::EncodableValue("taskStorePath"));
+  ASSERT_NE(store, result_map.end());
+  const auto& store_path = std::get<std::string>(store->second);
+  EXPECT_NE(store_path.find("xue_hua_downloader_tasks.tsv"), std::string::npos);
 }
 
 }  // namespace test

@@ -177,6 +177,7 @@ public final class XueHuaNaviteBackgroundDownloaderPlugin: NSObject,
         "supportsChecksumVerification": true,
         "supportsNetworkConstraints": true,
         "defaultDownloadDirectory": defaultDir,
+        "taskStorePath": Self.persistenceFileURL().path,
       ])
 
     case "requestNotificationPermission":

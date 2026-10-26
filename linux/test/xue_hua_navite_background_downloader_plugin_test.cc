@@ -2,6 +2,8 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <cstring>
+
 #include "include/xue_hua_navite_background_downloader/xue_hua_navite_background_downloader_plugin.h"
 #include "xue_hua_navite_background_downloader_plugin_private.h"
 
@@ -18,6 +20,12 @@ TEST(XueHuaNaviteBackgroundDownloaderPlugin, GetCapabilities) {
   FlValue* platform = fl_value_lookup_string(result, "platform");
   ASSERT_NE(platform, nullptr);
   EXPECT_STREQ(fl_value_get_string(platform), "linux");
+  FlValue* store = fl_value_lookup_string(result, "taskStorePath");
+  ASSERT_NE(store, nullptr);
+  ASSERT_EQ(fl_value_get_type(store), FL_VALUE_TYPE_STRING);
+  const gchar* store_path = fl_value_get_string(store);
+  ASSERT_NE(store_path, nullptr);
+  EXPECT_NE(std::strstr(store_path, "xue_hua_downloader_tasks.tsv"), nullptr);
 }
 
 }  // namespace test

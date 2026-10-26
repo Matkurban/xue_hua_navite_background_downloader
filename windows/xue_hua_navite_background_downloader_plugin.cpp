@@ -462,6 +462,8 @@ void XueHuaNaviteBackgroundDownloaderPlugin::HandleMethodCall(
         flutter::EncodableValue(true);
     caps[flutter::EncodableValue("defaultDownloadDirectory")] =
         flutter::EncodableValue(GetDefaultDownloadDirectory());
+    caps[flutter::EncodableValue("taskStorePath")] =
+        flutter::EncodableValue(GetPersistenceFilePath());
     result->Success(flutter::EncodableValue(caps));
     return;
   }

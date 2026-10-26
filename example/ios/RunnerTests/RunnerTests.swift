@@ -14,6 +14,9 @@ class RunnerTests: XCTestCase {
       let map = result as? [String: Any]
       XCTAssertEqual(map?["platform"] as? String, "ios")
       XCTAssertEqual(map?["supportsPauseResume"] as? Bool, true)
+      let store = map?["taskStorePath"] as? String
+      XCTAssertEqual(store?.contains("xue_hua_background_downloader"), true)
+      XCTAssertEqual(store?.hasSuffix("tasks.json"), true)
       resultExpectation.fulfill()
     }
     waitForExpectations(timeout: 2)

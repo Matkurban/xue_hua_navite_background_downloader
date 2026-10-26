@@ -124,6 +124,7 @@ Future<void> setupDownloader() async {
   final capabilities = await downloader.getCapabilities();
   print('原生引擎: ${capabilities.nativeEngine}');
   print('默认下载目录: ${capabilities.defaultDownloadDirectory}');
+  print('任务存储文件: ${capabilities.taskStorePath}');
 
   // 4. 恢复上次应用关闭前持久化的下载任务列表
   final persistedTasks = await downloader.getAllTasks();

@@ -207,7 +207,8 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
                         "supportsPersistence" to true,
                         "supportsChecksumVerification" to true,
                         "supportsNetworkConstraints" to true,
-                        "defaultDownloadDirectory" to defaultDir
+                        "defaultDownloadDirectory" to defaultDir,
+                        "taskStorePath" to getPersistenceFile().absolutePath
                     )
                 )
             }

@@ -50,7 +50,8 @@ class XueHuaNaviteBackgroundDownloader {
     return _platform.configure(config);
   }
 
-  /// Queries the current platform's native download capabilities and default directory.
+  /// Queries the current platform's native download capabilities, default directory,
+  /// and [DownloaderCapabilities.taskStorePath].
   Future<DownloaderCapabilities> getCapabilities() {
     return _platform.getCapabilities();
   }

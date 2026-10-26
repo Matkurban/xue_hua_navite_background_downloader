@@ -3,6 +3,11 @@ import 'package:test/test.dart';
 
 /// Drives the example dashboard over flutter_driver.
 ///
+/// The same script is strict on macOS, Windows, Linux, and the iOS simulator.
+/// Phone width builds every control in `dashboard-scroll` (see the example
+/// app). Each tap scrolls its target into view, text entry dismisses the
+/// software keyboard, and finders wait up to 30s. No iOS step is skipped.
+///
 /// A 1 GiB OVH payload stays in `running` long enough to observe the queue,
 /// pause, and resume without depending on a transfer that finishes in one frame.
 /// Cancel assertions do not require downloaded bytes: on a fast link a task can
@@ -172,48 +177,67 @@ void main() {
         (text) => _isCanceled(text) || _isCompleted(text),
       );
     });
-  }, timeout: const Timeout(Duration(minutes: 6)));
+  }, timeout: const Timeout(Duration(minutes: 8)));
 }
 
-const _kTapTimeout = Duration(seconds: 15);
+const _kTapTimeout = Duration(seconds: 30);
 
 Future<void> _tap(FlutterDriver driver, String key) async {
   final finder = find.byValueKey(key);
-  if (_isTaskRowKey(key)) {
-    await _revealInTaskPane(driver, finder);
-  }
+  await _reveal(driver, finder);
   await driver.waitFor(finder, timeout: _kTapTimeout);
   await driver.tap(finder, timeout: _kTapTimeout);
+  await _settle();
 }
 
-bool _isTaskRowKey(String key) {
-  if (key.endsWith('-button') ||
-      key.endsWith('-field') ||
-      key.endsWith('-switch')) {
-    return false;
+/// Scrolls [item] into the control pane, task pane, or phone dashboard.
+///
+/// A failure here is ignored: desktop controls are often already on screen,
+/// and the following `waitFor` reports a missing key. iOS needs the scroll
+/// because the enqueue fields sit below the fold.
+Future<void> _reveal(FlutterDriver driver, SerializableFinder item) async {
+  try {
+    await driver.scrollIntoView(
+      item,
+      alignment: 0.15,
+      timeout: const Duration(seconds: 8),
+    );
+  } catch (_) {
+    // Already visible, or this key has no scrollable ancestor.
   }
-  return key.startsWith('pause-') ||
-      key.startsWith('resume-') ||
-      key.startsWith('cancel-') ||
-      key.startsWith('status-') ||
-      key.startsWith('progress-');
 }
 
-/// Brings a task-row widget into the task list. Keys are the same on Linux
-/// and Windows; the list itself is the scrollable, so this does not depend
-/// on a host path or a single-column layout.
-Future<void> _revealInTaskPane(
-  FlutterDriver driver,
-  SerializableFinder item,
-) async {
-  // The task pane builds every tile, so ensureVisible can reach a row that
-  // is below the current scroll offset on either desktop host.
-  await driver.scrollIntoView(item, timeout: const Duration(seconds: 10));
+Future<void> _settle() {
+  return Future<void>.delayed(const Duration(milliseconds: 150));
 }
 
 Future<void> _setField(FlutterDriver driver, String key, String value) async {
   await _tap(driver, key);
-  await driver.enterText(value, timeout: _kTapTimeout);
+  // The software keyboard on iOS attaches the input connection after focus.
+  await Future<void>.delayed(const Duration(milliseconds: 300));
+  try {
+    await driver.enterText(value, timeout: _kTapTimeout);
+  } catch (_) {
+    await _tap(driver, key);
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+    await driver.enterText(value, timeout: _kTapTimeout);
+  }
+  await _dismissKeyboard(driver);
+}
+
+/// Taps the status banner, which sits outside the text fields, so iOS hides
+/// the keyboard before the next control is tapped. Desktop banners have no
+/// action.
+Future<void> _dismissKeyboard(FlutterDriver driver) async {
+  try {
+    await driver.tap(
+      find.byValueKey('status-banner'),
+      timeout: const Duration(seconds: 5),
+    );
+  } catch (_) {
+    // The banner is only a focus sink. A miss must not fail the step.
+  }
+  await Future<void>.delayed(const Duration(milliseconds: 400));
 }
 
 Future<void> _expectKeyText(
@@ -278,7 +302,7 @@ Future<String> _waitStatus(
   var last = '';
   while (DateTime.now().isBefore(end)) {
     try {
-      await _revealInTaskPane(driver, finder);
+      await _reveal(driver, finder);
       last = await driver.getText(finder);
       if (predicate(last)) {
         return last;
@@ -302,7 +326,7 @@ Future<String> _waitProgress(
   var last = '';
   while (DateTime.now().isBefore(end)) {
     try {
-      await _revealInTaskPane(driver, finder);
+      await _reveal(driver, finder);
       last = await driver.getText(finder);
       if (predicate(last)) {
         return last;
