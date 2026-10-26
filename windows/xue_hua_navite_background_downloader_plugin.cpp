@@ -758,8 +758,11 @@ TaskRecord* XueHuaNaviteBackgroundDownloaderPlugin::PauseLocked(
 
   auto stop_it = active_stop_flags_.find(task_id);
   if (stop_it != active_stop_flags_.end()) {
+    // The worker erases the flag when it exits. Dropping it here lets
+    // ScheduleQueueLocked start another transfer while this one is still
+    // draining, so maxConcurrentTasks is exceeded and resume can open a
+    // second writer on the same .part file.
     stop_it->second->store(true);
-    active_stop_flags_.erase(stop_it);
   }
 
   rec.status = "paused";
@@ -804,7 +807,6 @@ TaskRecord* XueHuaNaviteBackgroundDownloaderPlugin::CancelLocked(
   auto stop_it = active_stop_flags_.find(task_id);
   if (stop_it != active_stop_flags_.end()) {
     stop_it->second->store(true);
-    active_stop_flags_.erase(stop_it);
   }
 
   if (delete_partial) {
@@ -832,7 +834,6 @@ TaskRecord* XueHuaNaviteBackgroundDownloaderPlugin::RetryLocked(
   auto stop_it = active_stop_flags_.find(task_id);
   if (stop_it != active_stop_flags_.end()) {
     stop_it->second->store(true);
-    active_stop_flags_.erase(stop_it);
   }
 
   fs::path part_path = fs::u8path(rec.save_path + ".part");
@@ -862,7 +863,6 @@ bool XueHuaNaviteBackgroundDownloaderPlugin::RemoveTaskLocked(
   auto stop_it = active_stop_flags_.find(task_id);
   if (stop_it != active_stop_flags_.end()) {
     stop_it->second->store(true);
-    active_stop_flags_.erase(stop_it);
   }
   auto it = tasks_.find(task_id);
   if (it == tasks_.end()) return false;
@@ -1112,7 +1112,7 @@ void XueHuaNaviteBackgroundDownloaderPlugin::RunDownloadWorker(
 
             std::lock_guard<std::mutex> lock(state_mutex_);
             auto it = tasks_.find(task_id);
-            if (it != tasks_.end()) {
+            if (it != tasks_.end() && it->second.status == "running") {
               it->second.downloaded_bytes = current_bytes;
               it->second.total_bytes = total_bytes;
               it->second.progress =
@@ -1172,7 +1172,7 @@ void XueHuaNaviteBackgroundDownloaderPlugin::RunDownloadWorker(
         fs::remove(part_path, ec);
         std::lock_guard<std::mutex> lock(state_mutex_);
         auto it = tasks_.find(task_id);
-        if (it != tasks_.end()) {
+        if (it != tasks_.end() && it->second.status == "running") {
           it->second.status = "failed";
           it->second.computed_checksum = computed_hash;
           it->second.error = ErrorRecord{
@@ -1198,7 +1198,7 @@ void XueHuaNaviteBackgroundDownloaderPlugin::RunDownloadWorker(
 
     std::lock_guard<std::mutex> lock(state_mutex_);
     auto it = tasks_.find(task_id);
-    if (it != tasks_.end()) {
+    if (it != tasks_.end() && it->second.status == "running") {
       it->second.downloaded_bytes = final_size;
       if (it->second.total_bytes <= 0) it->second.total_bytes = final_size;
       it->second.progress = 1.0;
@@ -1216,7 +1216,7 @@ void XueHuaNaviteBackgroundDownloaderPlugin::RunDownloadWorker(
   } else {
     std::lock_guard<std::mutex> lock(state_mutex_);
     auto it = tasks_.find(task_id);
-    if (it != tasks_.end()) {
+    if (it != tasks_.end() && it->second.status == "running") {
       it->second.status = "failed";
       it->second.bytes_per_second = 0.0;
       it->second.estimated_remaining_ms = -1;
