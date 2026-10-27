@@ -1,3 +1,9 @@
+## 1.0.9
+
+- Tests: expand example integration coverage (notification permission, enqueueAll/watchGroup, watchTask, pauseAll/resumeAll/cancelAll, retry, clearCompleted, uniqueName, POST) and add `test_driver/integration_test.dart` for flutter drive.
+- iOS: route simulator checks through flutter drive via `example/tool/run_ios_simulator_tests.sh`.
+- Build: treat warnings as errors on Apple podspecs and Android Kotlin (`allWarningsAsErrors`).
+
 ## 1.0.8
 
 - Android: harden pause/resume so the worker fully stops before pause returns and stale workers cannot block resume.

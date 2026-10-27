@@ -1,6 +1,6 @@
 name: xue_hua_navite_background_downloader
 description: "Native multi-task background downloader for Flutter across Android, iOS, macOS, Windows, and Linux, with pause/resume, persistent queue, checksum, and notifications."
-version: 1.0.8
+version: 1.0.9
 homepage: https://github.com/Matkurban/xue_hua_navite_background_downloader
 repository: https://github.com/Matkurban/xue_hua_navite_background_downloader
 issue_tracker: https://github.com/Matkurban/xue_hua_navite_background_downloader/issues
