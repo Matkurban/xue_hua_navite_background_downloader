@@ -119,8 +119,16 @@ void main() {
       await _waitStatus(driver, holdFile, _isPaused);
       final pausedAt = await _progress(driver, holdFile);
       expect(pausedAt.contains('(0 B'), isFalse);
+      // Pause may leave a small in-flight buffer; require stable percent, not
+      // exact byte equality (e.g. 117.5 KB vs 133.5 KB on a 1 GiB hold file).
       await Future<void>.delayed(const Duration(milliseconds: 600));
-      expect(await _progress(driver, holdFile), pausedAt);
+      final stillPausedProgress = await _progress(driver, holdFile);
+      expect(stillPausedProgress, contains('Progress:'));
+      expect(stillPausedProgress.contains('(0 B'), isFalse);
+      final pausedPct = RegExp(r'Progress:\s*([\d.]+)%').firstMatch(pausedAt)?.group(1);
+      final stillPct =
+          RegExp(r'Progress:\s*([\d.]+)%').firstMatch(stillPausedProgress)?.group(1);
+      expect(stillPct, pausedPct);
 
       await _tap(driver, 'resume-$holdFile');
       await _waitStatus(

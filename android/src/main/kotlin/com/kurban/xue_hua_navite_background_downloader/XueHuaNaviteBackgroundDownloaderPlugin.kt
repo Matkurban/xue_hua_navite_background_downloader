@@ -489,7 +489,33 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
             record.estimatedRemainingMs = -1L
             record.updatedAtMs = System.currentTimeMillis()
         }
-        activeWorkers.remove(taskId)?.pause()
+        // Stop I/O and wait for executeDownload's finally to drop this control so
+        // resume cannot overlap two writers on the same .part file.
+        val control = activeWorkers[taskId]
+        control?.pause()
+        if (control != null) {
+            val waitUntil = System.currentTimeMillis() + 5000L
+            while (activeWorkers[taskId] === control && System.currentTimeMillis() < waitUntil) {
+                try {
+                    Thread.sleep(20L)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    break
+                }
+            }
+            activeWorkers.remove(taskId, control)
+        }
+        synchronized(record) {
+            val partFile = File("${record.savePath}.part")
+            if (partFile.exists()) {
+                record.downloadedBytes = partFile.length()
+                if (record.totalBytes > 0L) {
+                    record.progress =
+                        (record.downloadedBytes.toDouble() / record.totalBytes.toDouble()).coerceIn(0.0, 1.0)
+                }
+            }
+            record.updatedAtMs = System.currentTimeMillis()
+        }
         persistTasks()
         emitTaskUpdate(record)
         updateTaskNotification(record)
@@ -498,6 +524,22 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
 
     private fun resumeInternal(taskId: String): TaskRecord? {
         val record = tasks[taskId] ?: return null
+        // If pause wind-down is slow, a stale WorkerControl can block scheduleQueue
+        // (queued && !activeWorkers.containsKey). Cancel and wait briefly, then force-drop.
+        val stale = activeWorkers[taskId]
+        if (stale != null) {
+            stale.cancel()
+            val waitUntil = System.currentTimeMillis() + 3000L
+            while (activeWorkers[taskId] === stale && System.currentTimeMillis() < waitUntil) {
+                try {
+                    Thread.sleep(20L)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    break
+                }
+            }
+            activeWorkers.remove(taskId, stale)
+        }
         synchronized(record) {
             if (record.status != "paused" && record.status != "failed") {
                 return record
@@ -700,7 +742,8 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
                 }
             }
         } finally {
-            activeWorkers.remove(record.taskId)
+            // Only drop our own control — resume may already have replaced us.
+            activeWorkers.remove(record.taskId, control)
             scheduleQueue()
         }
     }
@@ -732,6 +775,7 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
                     outputStream.use { it.write(bodyBytes) }
                 }
             }
+            control.connection = connection
 
             connection.connect()
             if (control.isStopped()) {
@@ -906,6 +950,7 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
                 errorMessage = e.message ?: e.javaClass.simpleName
             )
         } finally {
+            control.connection = null
             runCatching { connection?.disconnect() }
         }
     }
@@ -1204,13 +1249,19 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
         private val stopped = AtomicBoolean(false)
         @Volatile
         var future: Future<*>? = null
+        @Volatile
+        var connection: HttpURLConnection? = null
 
         fun pause() {
             stopped.set(true)
+            // Disconnect + interrupt so a blocked read unblocks promptly.
+            runCatching { connection?.disconnect() }
+            future?.cancel(true)
         }
 
         fun cancel() {
             stopped.set(true)
+            runCatching { connection?.disconnect() }
             future?.cancel(true)
         }
 
