@@ -114,9 +114,9 @@ void main() {
   testWidgets('cancel running download', (tester) async {
     final task = await downloader.enqueue(
       const DownloadRequest(
-        url: 'https://proof.ovh.net/files/10Mb.dat',
+        url: 'https://speed.cloudflare.com/__down?bytes=20971520',
         saveDirectory: '',
-        fileName: 'xh_verify_cancel_10mb.dat',
+        fileName: 'xh_verify_cancel_20mb.bin',
         group: 'verify_cancel',
         priority: DownloadPriority.normal,
         conflictResolution: DownloadConflictResolution.overwrite,
@@ -159,9 +159,9 @@ void main() {
   testWidgets('pause and resume when supported', (tester) async {
     final task = await downloader.enqueue(
       const DownloadRequest(
-        url: 'https://proof.ovh.net/files/10Mb.dat',
+        url: 'https://speed.cloudflare.com/__down?bytes=5242880',
         saveDirectory: '',
-        fileName: 'xh_verify_pause_10mb.dat',
+        fileName: 'xh_verify_pause_5mb.bin',
         group: 'verify_pause',
         priority: DownloadPriority.normal,
         conflictResolution: DownloadConflictResolution.overwrite,
@@ -211,26 +211,42 @@ void main() {
     expect(resumed, isNotNull);
 
     DownloadTask? finished;
-    final deadline = DateTime.now().add(const Duration(seconds: 90));
+    DownloadTask? lastSeen;
+    var nullPolls = 0;
+    final deadline = DateTime.now().add(const Duration(seconds: 120));
     while (DateTime.now().isBefore(deadline)) {
       final latest = await downloader.getTask(task.taskId);
-      if (latest != null &&
-          (latest.status == DownloadStatus.completed ||
-              latest.status == DownloadStatus.failed ||
-              latest.status == DownloadStatus.canceled)) {
+      lastSeen = latest;
+      if (latest == null) {
+        nullPolls++;
+        // ignore: avoid_print
+        print('GETTASK_NULL id=${task.taskId} nullPolls=$nullPolls');
+      } else if (latest.status == DownloadStatus.completed ||
+          latest.status == DownloadStatus.failed ||
+          latest.status == DownloadStatus.canceled) {
         finished = latest;
         break;
+      } else if (nullPolls == 0 &&
+          latest.downloadedBytes > 0 &&
+          latest.downloadedBytes % (512 * 1024) < 8192) {
+        // ignore: avoid_print
+        print(
+          'RESUME_PROGRESS: status=${latest.status.name} bytes=${latest.downloadedBytes}',
+        );
       }
       await Future<void>.delayed(const Duration(milliseconds: 500));
     }
     // ignore: avoid_print
     print(
-      'RESUME_DONE: status=${finished?.status.name} bytes=${finished?.downloadedBytes} pauseBytes=$bytesAtPause',
+      'RESUME_DONE: finished=${finished?.status.name} finishedBytes=${finished?.downloadedBytes} '
+      'lastSeen=${lastSeen?.status.name} lastBytes=${lastSeen?.downloadedBytes} '
+      'nullPolls=$nullPolls pauseBytes=$bytesAtPause',
     );
-    expect(finished, isNotNull);
+    expect(lastSeen, isNotNull, reason: 'getTask became null after resume');
+    expect(finished, isNotNull, reason: 'download never reached a terminal state after resume');
     expect(finished!.status, DownloadStatus.completed);
     expect(finished.downloadedBytes, greaterThanOrEqualTo(bytesAtPause));
-    expect(finished.downloadedBytes, 10485760);
+    expect(finished.downloadedBytes, 5242880);
     await downloader.removeTask(task.taskId, deleteFile: true);
   });
 
