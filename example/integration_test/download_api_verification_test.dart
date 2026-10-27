@@ -409,6 +409,304 @@ void main() {
     }
   });
 
+
+  testWidgets('requestNotificationPermission returns a boolean', (tester) async {
+    final granted = await downloader.requestNotificationPermission();
+    expect(granted, isA<bool>());
+    // ignore: avoid_print
+    print('NOTIFICATION_PERMISSION: granted=$granted');
+  });
+
+  testWidgets('enqueueAll batches and watchGroup receives updates', (tester) async {
+    final dir = await Directory.systemTemp.createTemp('xh_batch_');
+    final groupUpdates = <DownloadTask>[];
+    final sub = downloader.watchGroup('verify_enqueue_all').listen(groupUpdates.add);
+    try {
+      final tasks = await downloader.enqueueAll([
+        DownloadRequest(
+          url: 'https://httpbin.org/bytes/256',
+          saveDirectory: dir.path,
+          fileName: 'batch_a.bin',
+          group: 'verify_enqueue_all',
+          priority: DownloadPriority.high,
+          conflictResolution: DownloadConflictResolution.overwrite,
+          metadata: const <String, String>{'slot': 'a'},
+          notificationConfig: const DownloadNotificationConfig(enabled: false),
+        ),
+        DownloadRequest(
+          url: 'https://httpbin.org/bytes/512',
+          saveDirectory: dir.path,
+          fileName: 'batch_b.bin',
+          group: 'verify_enqueue_all',
+          priority: DownloadPriority.normal,
+          conflictResolution: DownloadConflictResolution.overwrite,
+          metadata: const <String, String>{'slot': 'b'},
+          notificationConfig: const DownloadNotificationConfig(enabled: false),
+        ),
+      ]);
+      expect(tasks, hasLength(2));
+      expect(tasks.map((t) => t.taskId).toSet(), hasLength(2));
+
+      final empty = await downloader.enqueueAll(const <DownloadRequest>[]);
+      expect(empty, isEmpty);
+
+      final doneA = await _waitTerminal(downloader, tasks[0].taskId);
+      final doneB = await _waitTerminal(downloader, tasks[1].taskId);
+      expect(doneA.status, DownloadStatus.completed);
+      expect(doneB.status, DownloadStatus.completed);
+      expect(groupUpdates.any((t) => t.taskId == tasks[0].taskId), isTrue);
+      expect(groupUpdates.any((t) => t.taskId == tasks[1].taskId), isTrue);
+
+      await downloader.removeTask(tasks[0].taskId, deleteFile: true);
+      await downloader.removeTask(tasks[1].taskId, deleteFile: true);
+    } finally {
+      await sub.cancel();
+      await dir.delete(recursive: true);
+    }
+  });
+
+  testWidgets('watchTask emits progress for a single download', (tester) async {
+    final dir = await Directory.systemTemp.createTemp('xh_watch_');
+    const taskId = 'xh-verify-watch-task';
+    final watched = <DownloadTask>[];
+    final sub = downloader.watchTask(taskId).listen(watched.add);
+    try {
+      final task = await downloader.enqueue(
+        DownloadRequest(
+          url: 'https://httpbin.org/bytes/8192',
+          saveDirectory: dir.path,
+          fileName: 'watch.bin',
+          taskId: taskId,
+          group: 'verify_watch',
+          conflictResolution: DownloadConflictResolution.overwrite,
+          notificationConfig: const DownloadNotificationConfig(enabled: false),
+        ),
+      );
+      expect(task.taskId, taskId);
+      final done = await _waitTerminal(downloader, taskId);
+      await Future<void>.delayed(const Duration(milliseconds: 400));
+      expect(done.status, DownloadStatus.completed);
+      expect(watched.any((t) => t.taskId == taskId), isTrue);
+      await downloader.removeTask(taskId, deleteFile: true);
+    } finally {
+      await sub.cancel();
+      await dir.delete(recursive: true);
+    }
+  });
+
+  testWidgets('pauseAll resumeAll and cancelAll respect group scope', (
+    tester,
+  ) async {
+    final hold = await downloader.enqueue(
+      const DownloadRequest(
+        url: 'https://speed.cloudflare.com/__down?bytes=8388608',
+        saveDirectory: '',
+        fileName: 'xh_verify_pause_all_8mb.bin',
+        group: 'verify_pause_all',
+        priority: DownloadPriority.normal,
+        conflictResolution: DownloadConflictResolution.overwrite,
+        notificationConfig: DownloadNotificationConfig(enabled: false),
+      ),
+    );
+    // ignore: avoid_print
+    print('PAUSE_ALL_ENQUEUED: ${hold.taskId}');
+
+    final waitUntil = DateTime.now().add(const Duration(seconds: 30));
+    DownloadTask? running;
+    while (DateTime.now().isBefore(waitUntil)) {
+      final latest = await downloader.getTask(hold.taskId);
+      if (latest != null && latest.downloadedBytes > 64 * 1024) {
+        running = latest;
+        break;
+      }
+      if (latest != null && latest.status == DownloadStatus.completed) {
+        // ignore: avoid_print
+        print('PAUSE_ALL_SKIP: completed too fast');
+        await downloader.removeTask(hold.taskId, deleteFile: true);
+        return;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+    }
+    expect(running, isNotNull, reason: 'never reached running with bytes');
+
+    final paused = await downloader.pauseAll(group: 'verify_pause_all');
+    expect(paused.any((t) => t.taskId == hold.taskId), isTrue);
+    final afterPause = await downloader.getTask(hold.taskId);
+    expect(afterPause?.status, DownloadStatus.paused);
+
+    final outsider = await downloader.pauseAll(group: 'verify_pause_all_absent');
+    expect(outsider.any((t) => t.taskId == hold.taskId), isFalse);
+
+    final resumed = await downloader.resumeAll(group: 'verify_pause_all');
+    expect(resumed.any((t) => t.taskId == hold.taskId), isTrue);
+
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+    final canceled = await downloader.cancelAll(
+      group: 'verify_pause_all',
+      deletePartialFiles: true,
+    );
+    expect(canceled.any((t) => t.taskId == hold.taskId), isTrue);
+    final afterCancel = await downloader.getTask(hold.taskId);
+    expect(
+      afterCancel == null ||
+          afterCancel.status == DownloadStatus.canceled ||
+          afterCancel.status == DownloadStatus.completed,
+      isTrue,
+    );
+    await downloader.removeTask(hold.taskId, deleteFile: true);
+  });
+
+  testWidgets('retry requeues a canceled download to completion', (tester) async {
+    final dir = await Directory.systemTemp.createTemp('xh_retry_');
+    try {
+      final task = await downloader.enqueue(
+        DownloadRequest(
+          url: 'https://speed.cloudflare.com/__down?bytes=1048576',
+          saveDirectory: dir.path,
+          fileName: 'xh_verify_retry_1mb.bin',
+          group: 'verify_retry',
+          conflictResolution: DownloadConflictResolution.overwrite,
+          maxRetries: 0,
+          notificationConfig: const DownloadNotificationConfig(enabled: false),
+        ),
+      );
+      // ignore: avoid_print
+      print('RETRY_ENQUEUED: ${task.taskId}');
+
+      final waitUntil = DateTime.now().add(const Duration(seconds: 20));
+      while (DateTime.now().isBefore(waitUntil)) {
+        final latest = await downloader.getTask(task.taskId);
+        if (latest != null &&
+            (latest.status == DownloadStatus.running ||
+                latest.downloadedBytes > 0 ||
+                latest.status == DownloadStatus.completed)) {
+          break;
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+      }
+
+      final canceled = await downloader.cancel(
+        task.taskId,
+        deletePartialFile: true,
+      );
+      expect(canceled, isNotNull);
+      if (canceled!.status == DownloadStatus.completed) {
+        // ignore: avoid_print
+        print('RETRY_SKIP: finished before cancel');
+        await downloader.removeTask(task.taskId, deleteFile: true);
+        return;
+      }
+      expect(canceled.status, DownloadStatus.canceled);
+
+      final retried = await downloader.retry(task.taskId);
+      expect(retried, isNotNull);
+      expect(
+        retried!.status == DownloadStatus.queued ||
+            retried.status == DownloadStatus.running ||
+            retried.status == DownloadStatus.completed,
+        isTrue,
+      );
+      final done = await _waitTerminal(
+        downloader,
+        task.taskId,
+        timeout: const Duration(seconds: 90),
+      );
+      expect(done.status, DownloadStatus.completed, reason: done.error?.message);
+      await downloader.removeTask(task.taskId, deleteFile: true);
+    } finally {
+      await dir.delete(recursive: true);
+    }
+  });
+
+  testWidgets('clearCompleted removes finished tasks from the store', (
+    tester,
+  ) async {
+    final dir = await Directory.systemTemp.createTemp('xh_clear_');
+    try {
+      final task = await downloader.enqueue(
+        DownloadRequest(
+          url: 'https://httpbin.org/bytes/128',
+          saveDirectory: dir.path,
+          fileName: 'clear_me.bin',
+          group: 'verify_clear',
+          conflictResolution: DownloadConflictResolution.overwrite,
+          notificationConfig: const DownloadNotificationConfig(enabled: false),
+        ),
+      );
+      final done = await _waitTerminal(downloader, task.taskId);
+      expect(done.status, DownloadStatus.completed);
+
+      final removed = await downloader.clearCompleted(
+        group: 'verify_clear',
+        deleteFiles: true,
+      );
+      expect(removed, greaterThanOrEqualTo(1));
+      final leftover = await downloader.getAllTasks(group: 'verify_clear');
+      expect(leftover.map((t) => t.taskId), isNot(contains(task.taskId)));
+      expect(await downloader.getTask(task.taskId), isNull);
+    } finally {
+      await dir.delete(recursive: true);
+    }
+  });
+
+  testWidgets('uniqueName conflict creates a distinct destination file', (
+    tester,
+  ) async {
+    final dir = await Directory.systemTemp.createTemp('xh_unique_');
+    try {
+      final existing = File(_join(dir.path, 'shared.bin'));
+      await existing.writeAsBytes(List<int>.filled(16, 9));
+
+      final task = await downloader.enqueue(
+        DownloadRequest(
+          url: 'https://httpbin.org/bytes/64',
+          saveDirectory: dir.path,
+          fileName: 'shared.bin',
+          group: 'verify_unique',
+          conflictResolution: DownloadConflictResolution.uniqueName,
+          notificationConfig: const DownloadNotificationConfig(enabled: false),
+        ),
+      );
+      final done = await _waitTerminal(downloader, task.taskId);
+      expect(done.status, DownloadStatus.completed, reason: done.error?.message);
+      expect(done.savePath, isNot(existing.path));
+      expect(File(done.savePath).existsSync(), isTrue);
+      expect(await existing.length(), 16);
+      await downloader.removeTask(task.taskId, deleteFile: true);
+    } finally {
+      await dir.delete(recursive: true);
+    }
+  });
+
+  testWidgets('POST method sends body and completes', (tester) async {
+    final dir = await Directory.systemTemp.createTemp('xh_post_');
+    try {
+      final task = await downloader.enqueue(
+        DownloadRequest(
+          url: 'https://httpbin.org/post',
+          saveDirectory: dir.path,
+          fileName: 'post.json',
+          group: 'verify_post',
+          method: DownloadHttpMethod.post,
+          postBody: '{"plugin":"xue_hua","case":"integration"}',
+          headers: const <String, String>{
+            'Content-Type': 'application/json',
+          },
+          conflictResolution: DownloadConflictResolution.overwrite,
+          notificationConfig: const DownloadNotificationConfig(enabled: false),
+        ),
+      );
+      final done = await _waitTerminal(downloader, task.taskId);
+      expect(done.status, DownloadStatus.completed, reason: done.error?.message);
+      final body = await File(done.savePath).readAsString();
+      expect(body, contains('xue_hua'));
+      expect(body, contains('integration'));
+      await downloader.removeTask(task.taskId, deleteFile: true);
+    } finally {
+      await dir.delete(recursive: true);
+    }
+  });
+
   testWidgets('getAllTasks filters by group and the store file is readable', (
     tester,
   ) async {

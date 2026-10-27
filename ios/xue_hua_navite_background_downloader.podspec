@@ -13,6 +13,12 @@ A native multi-task background downloader plugin for Flutter supporting pause/re
   s.dependency 'Flutter'
   s.platform = :ios, '15.0'
 
-  s.pod_target_xcconfig = { 'DEFINES_MODULE' => 'YES', 'EXCLUDED_ARCHS[sdk=iphonesimulator*]' => 'i386' }
+  s.pod_target_xcconfig = {
+    'DEFINES_MODULE' => 'YES',
+    'EXCLUDED_ARCHS[sdk=iphonesimulator*]' => 'i386',
+    'GCC_TREAT_WARNINGS_AS_ERRORS' => 'YES',
+    'SWIFT_TREAT_WARNINGS_AS_ERRORS' => 'YES',
+    'WARNING_CFLAGS' => '-Wall -Wextra',
+  }
   s.swift_version = '5.0'
 end

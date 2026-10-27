@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Integration test and flutter_driver on a booted iOS Simulator.
+# Integration test (flutter drive) and UI flutter_driver on a booted iOS Simulator.
 #
 # Uses the same cases as macOS desktop (example/tool/run_desktop_tests.sh).
+# API coverage: drive --driver=test_driver/integration_test.dart
+#   --target=integration_test/download_api_verification_test.dart
 # The driver does not skip steps. Phone width builds every keyed control in
 # one scroll view, and the host script scrolls each target into view.
 #
@@ -75,11 +77,13 @@ if ! DEVICE="$(pick_ios_device "${1:-}")" || [[ -z "${DEVICE}" ]]; then
 fi
 
 echo "== iOS simulator ${DEVICE} =="
-echo "== integration_test =="
-(cd "${EXAMPLE_DIR}" && "${FLUTTER}" test -d "${DEVICE}" \
-  integration_test/download_api_verification_test.dart)
+echo "== integration_test (flutter drive) =="
+(cd "${EXAMPLE_DIR}" && "${FLUTTER}" drive \
+  --driver=test_driver/integration_test.dart \
+  --target=integration_test/download_api_verification_test.dart \
+  -d "${DEVICE}")
 
-echo "== flutter_driver =="
+echo "== flutter_driver UI =="
 (cd "${EXAMPLE_DIR}" && "${FLUTTER}" drive \
   --driver=test_driver/app_test.dart \
   --target=test_driver/app.dart \
