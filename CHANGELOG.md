@@ -1,3 +1,9 @@
+## 1.0.8
+
+- Android: harden pause/resume so the worker fully stops before pause returns and stale workers cannot block resume.
+- Android/example: AGP 9.1.1.
+- Tests: stabilize Android integ pause/resume (Cloudflare URLs + getTask diagnostics) and relax flutter_driver pause progress byte equality.
+
 ## 1.0.7
 
 * `getCapabilities()` reports `taskStorePath`, the absolute path of the persisted task queue. Apple platforms use Application Support `xue_hua_background_downloader/tasks.json`. Android uses `filesDir/xue_hua_downloader_tasks.json`. Linux and Windows keep `xue_hua_downloader_tasks.tsv` in the default download directory. The field defaults to empty when an older engine omits it.
