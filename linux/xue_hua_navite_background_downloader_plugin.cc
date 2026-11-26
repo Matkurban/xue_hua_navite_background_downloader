@@ -603,8 +603,9 @@ class LinuxDownloaderEngine {
 
     auto stop_it = active_stops_.find(task_id);
     if (stop_it != active_stops_.end()) {
+      // Keep the slot until the old worker exits via EraseActiveStopLocked()
+      // and calls ScheduleQueueLocked() to start the replacement task safely.
       stop_it->second->store(true);
-      active_stops_.erase(stop_it);
     }
 
     std::string dir_str = GetFlString(args, "saveDirectory");

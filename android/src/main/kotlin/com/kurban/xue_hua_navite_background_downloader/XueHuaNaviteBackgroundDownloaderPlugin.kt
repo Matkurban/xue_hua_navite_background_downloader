@@ -101,6 +101,9 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
     @Volatile
     private var autoResumeOnStartup: Boolean = false
 
+    @Volatile
+    private var isDetached: Boolean = false
+
     private val tasks = ConcurrentHashMap<String, TaskRecord>()
     private val activeWorkers = ConcurrentHashMap<String, WorkerControl>()
     private val executorLock = Any()
@@ -190,6 +193,7 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
     }
 
     override fun onAttachedToEngine(flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
+        isDetached = false
         applicationContext = flutterPluginBinding.applicationContext
         methodChannel = MethodChannel(
             flutterPluginBinding.binaryMessenger,
@@ -209,8 +213,13 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
-        methodChannel.setMethodCallHandler(null)
-        eventChannel.setStreamHandler(null)
+        isDetached = true
+        if (::methodChannel.isInitialized) {
+            methodChannel.setMethodCallHandler(null)
+        }
+        if (::eventChannel.isInitialized) {
+            eventChannel.setStreamHandler(null)
+        }
         eventSink = null
         completePendingPermissionResults(false)
         synchronized(queueLock) {
@@ -683,6 +692,9 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
             activeWorkers.remove(taskId, stale)
         }
         synchronized(record) {
+            if (tasks[taskId] !== record) {
+                return null
+            }
             if (record.status != "paused" && record.status != "failed") {
                 return record
             }
@@ -764,8 +776,12 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
         return true
     }
 
-    private fun scheduleQueue() {
+    internal fun scheduleQueue() {
         synchronized(queueLock) {
+            if (isDetached) {
+                updateForegroundServiceState()
+                return
+            }
             val runningCount = activeWorkers.size
             val availableSlots = maxConcurrentTasks - runningCount
             if (availableSlots <= 0) {
@@ -887,7 +903,9 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
             // Only drop our own control — resume may already have replaced us.
             activeWorkers.remove(record.taskId, control)
             control.markExited()
-            scheduleQueue()
+            if (!isDetached) {
+                scheduleQueue()
+            }
         }
     }
 
@@ -1158,7 +1176,7 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
             ?: XueHuaDownloadForegroundService.defaultDispatcher(applicationContext)
         val activeCount = activeWorkers.size
         XueHuaDownloadForegroundService.syncServiceState(
-            shouldRun = enableNotifications && activeCount > 0,
+            shouldRun = !isDetached && enableNotifications && activeCount > 0,
             channelId = notificationChannelId,
             channelName = notificationChannelName,
             activeCount = activeCount,
@@ -1174,7 +1192,8 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
             if (!granted) return
         }
 
-        val manager = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val manager = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+            ?: return
         val title = record.notificationConfig.title?.takeIf { it.isNotEmpty() } ?: record.fileName
         val pct = if (record.progress >= 0.0) (record.progress * 100.0).roundToInt().coerceIn(0, 100) else 0
         val speedText = formatSpeed(record.bytesPerSecond)
@@ -1232,7 +1251,8 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
     }
 
     private fun cancelTaskNotification(taskId: String) {
-        val manager = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val manager = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+            ?: return
         runCatching {
             manager.cancel(notificationIdForTask(taskId))
         }

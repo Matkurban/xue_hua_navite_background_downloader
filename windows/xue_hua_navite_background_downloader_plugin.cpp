@@ -33,6 +33,8 @@ constexpr wchar_t kEventWindowClassName[] =
 // thread. WM_APP keeps it out of the WM_USER range used by other windows.
 constexpr UINT kEventFlushMessage = WM_APP + 0x4855;
 constexpr UINT kNotificationFlushMessage = WM_APP + 0x4856;
+constexpr UINT_PTR kTrayCleanupTimerId = 1;
+constexpr UINT kTrayCleanupDelayMs = 10000;
 
 int64_t NowMs() {
   using namespace std::chrono;
@@ -391,27 +393,36 @@ XueHuaNaviteBackgroundDownloaderPlugin::XueHuaNaviteBackgroundDownloaderPlugin()
   LoadPersistedTasksLocked();
 }
 
-void XueHuaNaviteBackgroundDownloaderPlugin::WorkerControl::CloseHandles() {
+bool XueHuaNaviteBackgroundDownloaderPlugin::WorkerControl::AttachRequest(
+    void* req) {
+  std::lock_guard<std::mutex> lock(request_mutex);
+  if (stopped.load() || req == nullptr) {
+    return false;
+  }
+  active_request = req;
+  return true;
+}
+
+void XueHuaNaviteBackgroundDownloaderPlugin::WorkerControl::
+    DetachAndCloseRequest() {
   HINTERNET req = nullptr;
-  HINTERNET conn = nullptr;
-  HINTERNET sess = nullptr;
   {
-    std::lock_guard<std::mutex> lock(handle_mutex);
-    req = static_cast<HINTERNET>(h_request);
-    h_request = nullptr;
-    conn = static_cast<HINTERNET>(h_connect);
-    h_connect = nullptr;
-    sess = static_cast<HINTERNET>(h_session);
-    h_session = nullptr;
+    std::lock_guard<std::mutex> lock(request_mutex);
+    req = static_cast<HINTERNET>(active_request);
+    active_request = nullptr;
   }
   if (req) WinHttpCloseHandle(req);
-  if (conn) WinHttpCloseHandle(conn);
-  if (sess) WinHttpCloseHandle(sess);
 }
 
 void XueHuaNaviteBackgroundDownloaderPlugin::WorkerControl::Cancel() {
   stopped.store(true);
-  CloseHandles();
+  HINTERNET req = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(request_mutex);
+    req = static_cast<HINTERNET>(active_request);
+    active_request = nullptr;
+  }
+  if (req) WinHttpCloseHandle(req);
 }
 
 XueHuaNaviteBackgroundDownloaderPlugin::~XueHuaNaviteBackgroundDownloaderPlugin() {
@@ -513,15 +524,24 @@ void XueHuaNaviteBackgroundDownloaderPlugin::HandleMethodCall(
       result->Error("invalid_arguments", "Expected request map");
       return;
     }
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    TaskRecord rec = CreateOrResetTaskLocked(*args);
-    ScheduleQueueLocked();
-    result->Success(flutter::EncodableValue(rec.ToMap()));
+    flutter::EncodableMap rec_map;
+    std::vector<std::shared_ptr<WorkerControl>> controls_to_cancel;
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      TaskRecord rec = CreateOrResetTaskLocked(*args, &controls_to_cancel);
+      ScheduleQueueLocked();
+      rec_map = rec.ToMap();
+    }
+    for (auto& ctrl : controls_to_cancel) {
+      if (ctrl) ctrl->Cancel();
+    }
+    result->Success(flutter::EncodableValue(rec_map));
     return;
   }
 
   if (method == "enqueueAll") {
     flutter::EncodableList created;
+    std::vector<std::shared_ptr<WorkerControl>> controls_to_cancel;
     if (args) {
       auto it = args->find(flutter::EncodableValue("requests"));
       if (it != args->end() &&
@@ -531,12 +551,15 @@ void XueHuaNaviteBackgroundDownloaderPlugin::HandleMethodCall(
              std::get<flutter::EncodableList>(it->second)) {
           if (std::holds_alternative<flutter::EncodableMap>(item)) {
             TaskRecord rec = CreateOrResetTaskLocked(
-                std::get<flutter::EncodableMap>(item));
+                std::get<flutter::EncodableMap>(item), &controls_to_cancel);
             created.push_back(flutter::EncodableValue(rec.ToMap()));
           }
         }
         ScheduleQueueLocked();
       }
+    }
+    for (auto& ctrl : controls_to_cancel) {
+      if (ctrl) ctrl->Cancel();
     }
     result->Success(flutter::EncodableValue(created));
     return;
@@ -544,11 +567,23 @@ void XueHuaNaviteBackgroundDownloaderPlugin::HandleMethodCall(
 
   if (method == "pause") {
     std::string task_id = args ? GetStringArg(*args, "taskId") : "";
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    TaskRecord* rec = PauseLocked(task_id);
-    ScheduleQueueLocked();
-    if (rec) {
-      result->Success(flutter::EncodableValue(rec->ToMap()));
+    bool has_rec = false;
+    flutter::EncodableMap rec_map;
+    std::vector<std::shared_ptr<WorkerControl>> controls_to_cancel;
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      TaskRecord* rec = PauseLocked(task_id, &controls_to_cancel);
+      ScheduleQueueLocked();
+      if (rec) {
+        has_rec = true;
+        rec_map = rec->ToMap();
+      }
+    }
+    for (auto& ctrl : controls_to_cancel) {
+      if (ctrl) ctrl->Cancel();
+    }
+    if (has_rec) {
+      result->Success(flutter::EncodableValue(rec_map));
     } else {
       result->Success();
     }
@@ -571,11 +606,23 @@ void XueHuaNaviteBackgroundDownloaderPlugin::HandleMethodCall(
   if (method == "cancel") {
     std::string task_id = args ? GetStringArg(*args, "taskId") : "";
     bool del = args ? GetBoolArg(*args, "deletePartialFile", true) : true;
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    TaskRecord* rec = CancelLocked(task_id, del);
-    ScheduleQueueLocked();
-    if (rec) {
-      result->Success(flutter::EncodableValue(rec->ToMap()));
+    bool has_rec = false;
+    flutter::EncodableMap rec_map;
+    std::vector<std::shared_ptr<WorkerControl>> controls_to_cancel;
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      TaskRecord* rec = CancelLocked(task_id, del, &controls_to_cancel);
+      ScheduleQueueLocked();
+      if (rec) {
+        has_rec = true;
+        rec_map = rec->ToMap();
+      }
+    }
+    for (auto& ctrl : controls_to_cancel) {
+      if (ctrl) ctrl->Cancel();
+    }
+    if (has_rec) {
+      result->Success(flutter::EncodableValue(rec_map));
     } else {
       result->Success();
     }
@@ -584,11 +631,23 @@ void XueHuaNaviteBackgroundDownloaderPlugin::HandleMethodCall(
 
   if (method == "retry") {
     std::string task_id = args ? GetStringArg(*args, "taskId") : "";
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    TaskRecord* rec = RetryLocked(task_id);
-    ScheduleQueueLocked();
-    if (rec) {
-      result->Success(flutter::EncodableValue(rec->ToMap()));
+    bool has_rec = false;
+    flutter::EncodableMap rec_map;
+    std::vector<std::shared_ptr<WorkerControl>> controls_to_cancel;
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      TaskRecord* rec = RetryLocked(task_id, &controls_to_cancel);
+      ScheduleQueueLocked();
+      if (rec) {
+        has_rec = true;
+        rec_map = rec->ToMap();
+      }
+    }
+    for (auto& ctrl : controls_to_cancel) {
+      if (ctrl) ctrl->Cancel();
+    }
+    if (has_rec) {
+      result->Success(flutter::EncodableValue(rec_map));
     } else {
       result->Success();
     }
@@ -598,9 +657,16 @@ void XueHuaNaviteBackgroundDownloaderPlugin::HandleMethodCall(
   if (method == "removeTask") {
     std::string task_id = args ? GetStringArg(*args, "taskId") : "";
     bool del = args ? GetBoolArg(*args, "deleteFile", false) : false;
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    bool ok = RemoveTaskLocked(task_id, del);
-    ScheduleQueueLocked();
+    bool ok = false;
+    std::vector<std::shared_ptr<WorkerControl>> controls_to_cancel;
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      ok = RemoveTaskLocked(task_id, del, &controls_to_cancel);
+      ScheduleQueueLocked();
+    }
+    for (auto& ctrl : controls_to_cancel) {
+      if (ctrl) ctrl->Cancel();
+    }
     result->Success(flutter::EncodableValue(ok));
     return;
   }
@@ -608,16 +674,22 @@ void XueHuaNaviteBackgroundDownloaderPlugin::HandleMethodCall(
   if (method == "pauseAll") {
     std::string group = args ? GetStringArg(*args, "group") : "";
     flutter::EncodableList list;
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    for (auto& kv : tasks_) {
-      if (!group.empty() && kv.second.group != group) continue;
-      if (kv.second.status == "queued" || kv.second.status == "running") {
-        if (TaskRecord* p = PauseLocked(kv.first)) {
-          list.push_back(flutter::EncodableValue(p->ToMap()));
+    std::vector<std::shared_ptr<WorkerControl>> controls_to_cancel;
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      for (auto& kv : tasks_) {
+        if (!group.empty() && kv.second.group != group) continue;
+        if (kv.second.status == "queued" || kv.second.status == "running") {
+          if (TaskRecord* p = PauseLocked(kv.first, &controls_to_cancel)) {
+            list.push_back(flutter::EncodableValue(p->ToMap()));
+          }
         }
       }
+      ScheduleQueueLocked();
     }
-    ScheduleQueueLocked();
+    for (auto& ctrl : controls_to_cancel) {
+      if (ctrl) ctrl->Cancel();
+    }
     result->Success(flutter::EncodableValue(list));
     return;
   }
@@ -643,17 +715,24 @@ void XueHuaNaviteBackgroundDownloaderPlugin::HandleMethodCall(
     std::string group = args ? GetStringArg(*args, "group") : "";
     bool del = args ? GetBoolArg(*args, "deletePartialFiles", true) : true;
     flutter::EncodableList list;
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    for (auto& kv : tasks_) {
-      if (!group.empty() && kv.second.group != group) continue;
-      if (kv.second.status == "queued" || kv.second.status == "running" ||
-          kv.second.status == "paused") {
-        if (TaskRecord* c = CancelLocked(kv.first, del)) {
-          list.push_back(flutter::EncodableValue(c->ToMap()));
+    std::vector<std::shared_ptr<WorkerControl>> controls_to_cancel;
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      for (auto& kv : tasks_) {
+        if (!group.empty() && kv.second.group != group) continue;
+        if (kv.second.status == "queued" || kv.second.status == "running" ||
+            kv.second.status == "paused") {
+          if (TaskRecord* c =
+                  CancelLocked(kv.first, del, &controls_to_cancel)) {
+            list.push_back(flutter::EncodableValue(c->ToMap()));
+          }
         }
       }
+      ScheduleQueueLocked();
     }
-    ScheduleQueueLocked();
+    for (auto& ctrl : controls_to_cancel) {
+      if (ctrl) ctrl->Cancel();
+    }
     result->Success(flutter::EncodableValue(list));
     return;
   }
@@ -709,15 +788,20 @@ void XueHuaNaviteBackgroundDownloaderPlugin::HandleMethodCall(
 }
 
 TaskRecord XueHuaNaviteBackgroundDownloaderPlugin::CreateOrResetTaskLocked(
-    const flutter::EncodableMap& args) {
+    const flutter::EncodableMap& args,
+    std::vector<std::shared_ptr<WorkerControl>>* controls_to_cancel) {
   std::string url = GetStringArg(args, "url");
   std::string task_id = GetStringArg(args, "taskId");
   if (task_id.empty()) task_id = GenerateTaskId();
 
   auto active_it = active_stop_flags_.find(task_id);
   if (active_it != active_stop_flags_.end()) {
-    active_it->second->Cancel();
-    active_stop_flags_.erase(active_it);
+    // Keep the entry in active_stop_flags_ until the draining worker exits so
+    // ScheduleQueueLocked cannot launch a concurrent writer for the same task.
+    active_it->second->stopped.store(true);
+    if (controls_to_cancel) {
+      controls_to_cancel->push_back(active_it->second);
+    }
   }
 
   std::string raw_dir = GetStringArg(args, "saveDirectory");
@@ -797,7 +881,8 @@ TaskRecord XueHuaNaviteBackgroundDownloaderPlugin::CreateOrResetTaskLocked(
 }
 
 TaskRecord* XueHuaNaviteBackgroundDownloaderPlugin::PauseLocked(
-    const std::string& task_id) {
+    const std::string& task_id,
+    std::vector<std::shared_ptr<WorkerControl>>* controls_to_cancel) {
   auto it = tasks_.find(task_id);
   if (it == tasks_.end()) return nullptr;
   TaskRecord& rec = it->second;
@@ -809,7 +894,10 @@ TaskRecord* XueHuaNaviteBackgroundDownloaderPlugin::PauseLocked(
     // ScheduleQueueLocked start another transfer while this one is still
     // draining, so maxConcurrentTasks is exceeded and resume can open a
     // second writer on the same .part file.
-    stop_it->second->Cancel();
+    stop_it->second->stopped.store(true);
+    if (controls_to_cancel) {
+      controls_to_cancel->push_back(stop_it->second);
+    }
   }
 
   rec.status = "paused";
@@ -845,7 +933,8 @@ TaskRecord* XueHuaNaviteBackgroundDownloaderPlugin::ResumeLocked(
 }
 
 TaskRecord* XueHuaNaviteBackgroundDownloaderPlugin::CancelLocked(
-    const std::string& task_id, bool delete_partial) {
+    const std::string& task_id, bool delete_partial,
+    std::vector<std::shared_ptr<WorkerControl>>* controls_to_cancel) {
   auto it = tasks_.find(task_id);
   if (it == tasks_.end()) return nullptr;
   TaskRecord& rec = it->second;
@@ -853,7 +942,10 @@ TaskRecord* XueHuaNaviteBackgroundDownloaderPlugin::CancelLocked(
 
   auto stop_it = active_stop_flags_.find(task_id);
   if (stop_it != active_stop_flags_.end()) {
-    stop_it->second->Cancel();
+    stop_it->second->stopped.store(true);
+    if (controls_to_cancel) {
+      controls_to_cancel->push_back(stop_it->second);
+    }
   }
 
   if (delete_partial) {
@@ -873,14 +965,18 @@ TaskRecord* XueHuaNaviteBackgroundDownloaderPlugin::CancelLocked(
 }
 
 TaskRecord* XueHuaNaviteBackgroundDownloaderPlugin::RetryLocked(
-    const std::string& task_id) {
+    const std::string& task_id,
+    std::vector<std::shared_ptr<WorkerControl>>* controls_to_cancel) {
   auto it = tasks_.find(task_id);
   if (it == tasks_.end()) return nullptr;
   TaskRecord& rec = it->second;
 
   auto stop_it = active_stop_flags_.find(task_id);
   if (stop_it != active_stop_flags_.end()) {
-    stop_it->second->Cancel();
+    stop_it->second->stopped.store(true);
+    if (controls_to_cancel) {
+      controls_to_cancel->push_back(stop_it->second);
+    }
   }
 
   fs::path part_path = fs::u8path(rec.save_path + ".part");
@@ -906,10 +1002,14 @@ TaskRecord* XueHuaNaviteBackgroundDownloaderPlugin::RetryLocked(
 }
 
 bool XueHuaNaviteBackgroundDownloaderPlugin::RemoveTaskLocked(
-    const std::string& task_id, bool delete_file) {
+    const std::string& task_id, bool delete_file,
+    std::vector<std::shared_ptr<WorkerControl>>* controls_to_cancel) {
   auto stop_it = active_stop_flags_.find(task_id);
   if (stop_it != active_stop_flags_.end()) {
-    stop_it->second->Cancel();
+    stop_it->second->stopped.store(true);
+    if (controls_to_cancel) {
+      controls_to_cancel->push_back(stop_it->second);
+    }
   }
   auto it = tasks_.find(task_id);
   if (it == tasks_.end()) return false;
@@ -1100,27 +1200,13 @@ void XueHuaNaviteBackgroundDownloaderPlugin::RunDownloadWorker(
         Utf8ToWide(user_agent).c_str(), WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
         WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (hSession) {
-      { std::lock_guard<std::mutex> hlock(control->handle_mutex); control->h_session = hSession; }
-      if (control->stopped.load() || shutting_down_.load()) {
-        control->CloseHandles();
-        hSession = nullptr;
-      } else {
-        WinHttpSetTimeouts(hSession, connect_timeout_ms, connect_timeout_ms,
-                           read_timeout_ms, read_timeout_ms);
-      }
+      WinHttpSetTimeouts(hSession, connect_timeout_ms, connect_timeout_ms,
+                         read_timeout_ms, read_timeout_ms);
     }
   }
 
   if (hSession && !control->stopped.load() && !shutting_down_.load()) {
     hConnect = WinHttpConnect(hSession, host_buf, url_comp.nPort, 0);
-    if (hConnect) {
-      { std::lock_guard<std::mutex> hlock(control->handle_mutex); control->h_connect = hConnect; }
-      if (control->stopped.load() || shutting_down_.load()) {
-        control->CloseHandles();
-        hSession = nullptr;
-        hConnect = nullptr;
-      }
-    }
   }
 
   if (hConnect && !control->stopped.load() && !shutting_down_.load()) {
@@ -1130,15 +1216,6 @@ void XueHuaNaviteBackgroundDownloaderPlugin::RunDownloadWorker(
     hRequest = WinHttpOpenRequest(hConnect, verb.c_str(), path_buf, nullptr,
                                   WINHTTP_NO_REFERER,
                                   WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
-    if (hRequest) {
-      { std::lock_guard<std::mutex> hlock(control->handle_mutex); control->h_request = hRequest; }
-      if (control->stopped.load() || shutting_down_.load()) {
-        control->CloseHandles();
-        hSession = nullptr;
-        hConnect = nullptr;
-        hRequest = nullptr;
-      }
-    }
   }
 
   bool success = false;
@@ -1163,6 +1240,13 @@ void XueHuaNaviteBackgroundDownloaderPlugin::RunDownloadWorker(
                                    WINHTTP_ADDREQ_FLAG_REPLACE);
     }
 
+    if (!control->AttachRequest(hRequest)) {
+      WinHttpCloseHandle(hRequest);
+      hRequest = nullptr;
+    }
+  }
+
+  if (hRequest) {
     BOOL sent = WinHttpSendRequest(
         hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
         snapshot.post_body.empty()
@@ -1270,7 +1354,9 @@ void XueHuaNaviteBackgroundDownloaderPlugin::RunDownloadWorker(
     }
   }
 
-  control->CloseHandles();
+  control->DetachAndCloseRequest();
+  if (hConnect) WinHttpCloseHandle(hConnect);
+  if (hSession) WinHttpCloseHandle(hSession);
 
   if (control->stopped.load() || shutting_down_.load()) {
     std::lock_guard<std::mutex> lock(state_mutex_);
@@ -1391,20 +1477,26 @@ void XueHuaNaviteBackgroundDownloaderPlugin::StopEventDispatcher() {
     notification_dispatch_posted_ = false;
   }
   if (hwnd != nullptr) {
-    if (tray_icon_added_) {
-      NOTIFYICONDATAW nid{};
-      nid.cbSize = sizeof(nid);
-      nid.hWnd = hwnd;
-      nid.uID = 98401;
-      Shell_NotifyIconW(NIM_DELETE, &nid);
-      tray_icon_added_ = false;
-    }
+    CleanupTrayIcon(hwnd);
     ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
     MSG leftover;
     while (::PeekMessageW(&leftover, hwnd, kEventFlushMessage,
                           kNotificationFlushMessage, PM_REMOVE)) {
     }
     ::DestroyWindow(hwnd);
+  }
+}
+
+void XueHuaNaviteBackgroundDownloaderPlugin::CleanupTrayIcon(HWND hwnd) {
+  if (hwnd == nullptr) return;
+  ::KillTimer(hwnd, kTrayCleanupTimerId);
+  if (tray_icon_added_) {
+    NOTIFYICONDATAW nid{};
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = hwnd;
+    nid.uID = 98401;
+    Shell_NotifyIconW(NIM_DELETE, &nid);
+    tray_icon_added_ = false;
   }
 }
 
@@ -1457,6 +1549,9 @@ void XueHuaNaviteBackgroundDownloaderPlugin::FlushNotifications() {
       Shell_NotifyIconW(NIM_MODIFY, &nid);
     }
   }
+  if (tray_icon_added_) {
+    ::SetTimer(hwnd, kTrayCleanupTimerId, kTrayCleanupDelayMs, nullptr);
+  }
 }
 
 LRESULT CALLBACK
@@ -1476,6 +1571,10 @@ XueHuaNaviteBackgroundDownloaderPlugin::EventDispatcherWndProc(
   }
   if (message == kNotificationFlushMessage && self != nullptr) {
     self->FlushNotifications();
+    return 0;
+  }
+  if (message == WM_TIMER && wparam == kTrayCleanupTimerId && self != nullptr) {
+    self->CleanupTrayIcon(hwnd);
     return 0;
   }
   return ::DefWindowProcW(hwnd, message, wparam, lparam);

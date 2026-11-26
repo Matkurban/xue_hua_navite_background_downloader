@@ -143,7 +143,8 @@ open class XueHuaDownloadForegroundService : Service() {
 
     internal open fun ensureChannel(channelId: String, channelName: String) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+                ?: return
             val existing = manager.getNotificationChannel(channelId)
             if (existing == null) {
                 val channel = NotificationChannel(

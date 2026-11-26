@@ -107,22 +107,14 @@ class XueHuaNaviteBackgroundDownloaderPlugin : public flutter::Plugin {
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
 
  private:
-  TaskRecord CreateOrResetTaskLocked(const flutter::EncodableMap& args);
-  TaskRecord* PauseLocked(const std::string& task_id);
-  TaskRecord* ResumeLocked(const std::string& task_id);
-  TaskRecord* CancelLocked(const std::string& task_id, bool delete_partial);
-  TaskRecord* RetryLocked(const std::string& task_id);
-  bool RemoveTaskLocked(const std::string& task_id, bool delete_file);
-
   struct WorkerControl {
     std::atomic<bool> stopped{false};
-    std::mutex handle_mutex;
-    void* h_session = nullptr;
-    void* h_connect = nullptr;
-    void* h_request = nullptr;
+    std::mutex request_mutex;
+    void* active_request = nullptr;
 
+    bool AttachRequest(void* req);
+    void DetachAndCloseRequest();
     void Cancel();
-    void CloseHandles();
   };
 
   struct WorkerThreadEntry {
@@ -136,6 +128,23 @@ class XueHuaNaviteBackgroundDownloaderPlugin : public flutter::Plugin {
     DWORD info_flags = 0;
   };
 
+  TaskRecord CreateOrResetTaskLocked(
+      const flutter::EncodableMap& args,
+      std::vector<std::shared_ptr<WorkerControl>>* controls_to_cancel);
+  TaskRecord* PauseLocked(
+      const std::string& task_id,
+      std::vector<std::shared_ptr<WorkerControl>>* controls_to_cancel);
+  TaskRecord* ResumeLocked(const std::string& task_id);
+  TaskRecord* CancelLocked(
+      const std::string& task_id, bool delete_partial,
+      std::vector<std::shared_ptr<WorkerControl>>* controls_to_cancel);
+  TaskRecord* RetryLocked(
+      const std::string& task_id,
+      std::vector<std::shared_ptr<WorkerControl>>* controls_to_cancel);
+  bool RemoveTaskLocked(
+      const std::string& task_id, bool delete_file,
+      std::vector<std::shared_ptr<WorkerControl>>* controls_to_cancel);
+
   void ScheduleQueueLocked();
   void ReapFinishedWorkersLocked();
   void EraseActiveControlLocked(const std::string& task_id,
@@ -148,6 +157,7 @@ class XueHuaNaviteBackgroundDownloaderPlugin : public flutter::Plugin {
   void StopEventDispatcher();
   void FlushTaskUpdates();
   void FlushNotifications();
+  void CleanupTrayIcon(HWND hwnd);
   static LRESULT CALLBACK EventDispatcherWndProc(HWND hwnd,
                                                  UINT message,
                                                  WPARAM wparam,

@@ -7,6 +7,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
@@ -501,6 +502,73 @@ internal class XueHuaNaviteBackgroundDownloaderPluginTest {
         assertTrue(errorLatch.await(3, TimeUnit.SECONDS), "control error Result must not hang")
         assertEquals("control_error", capturedErrorCode)
         assertEquals("simulated_control_failure", capturedErrorMessage)
+    }
+
+    @Test
+    fun onDetachedFromEngine_withQueuedTasksAndExitingWorker_doesNotRespawnWorkerOrForegroundService() {
+        val plugin = XueHuaNaviteBackgroundDownloaderPlugin()
+        val mockContext = Mockito.mock(Context::class.java)
+        Mockito.`when`(mockContext.filesDir).thenReturn(tempDir)
+        plugin.applicationContext = mockContext
+        plugin.sdkIntProvider = { 24 }
+        plugin.mainThreadPoster = { it.run() }
+
+        val dispatcher = RecordingDispatcher()
+        plugin.foregroundServiceDispatcher = dispatcher
+
+        // Configure maxConcurrentTasks = 1 so a second task remains queued.
+        val configResult = Mockito.mock(MethodChannel.Result::class.java)
+        plugin.onMethodCall(
+            MethodCall("configure", mapOf("maxConcurrentTasks" to 1, "enableNotifications" to true)),
+            configResult
+        )
+
+        // Register an active worker occupying the single concurrency slot.
+        val savePath1 = File(tempDir, "active.bin").absolutePath
+        plugin.registerRunningTaskForTesting("task_active", savePath1) {}
+
+        // Enqueue a second task which must stay queued while slot 1 is occupied.
+        val enqueueResult = Mockito.mock(MethodChannel.Result::class.java)
+        plugin.onMethodCall(
+            MethodCall(
+                "enqueue",
+                mapOf(
+                    "taskId" to "task_queued",
+                    "url" to "https://example.invalid/queued.bin",
+                    "saveDirectory" to tempDir.absolutePath,
+                    "fileName" to "queued.bin",
+                    "maxRetries" to 0
+                )
+            ),
+            enqueueResult
+        )
+
+        val startsBeforeDetach = dispatcher.events.count { it.startsWith("start:") }
+
+        // Detach from FlutterEngine.
+        val mockBinding = Mockito.mock(FlutterPlugin.FlutterPluginBinding::class.java)
+        plugin.onDetachedFromEngine(mockBinding)
+
+        // Simulate an exiting worker invoking scheduleQueue() after detach.
+        plugin.scheduleQueue()
+
+        val startsAfterDetach = dispatcher.events.count { it.startsWith("start:") }
+        assertEquals(startsBeforeDetach, startsAfterDetach, "Must not start FGS after detach")
+        assertFalse(XueHuaDownloadForegroundService.isRequestedForTesting())
+
+        // Verify queued task was NOT respawned into running.
+        var queuedStatus: String? = null
+        plugin.onMethodCall(
+            MethodCall("getTask", mapOf("taskId" to "task_queued")),
+            object : MethodChannel.Result {
+                override fun success(result: Any?) {
+                    queuedStatus = (result as? Map<*, *>)?.get("status") as? String
+                }
+                override fun error(errorCode: String, errorMessage: String?, errorDetails: Any?) {}
+                override fun notImplemented() {}
+            }
+        )
+        assertEquals("queued", queuedStatus)
     }
 
     private fun mockStartIntent(): Intent {
