@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name             = 'xue_hua_navite_background_downloader'
-  s.version          = '1.0.0'
+  s.version          = '1.0.10'
   s.summary          = 'Native multi-task background downloader plugin for Flutter.'
   s.description      = <<-DESC
 A native multi-task background downloader plugin for Flutter supporting pause/resume, persistent queues, checksum verification, and system notifications.

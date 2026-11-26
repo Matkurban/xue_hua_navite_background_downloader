@@ -114,18 +114,46 @@ class XueHuaNaviteBackgroundDownloaderPlugin : public flutter::Plugin {
   TaskRecord* RetryLocked(const std::string& task_id);
   bool RemoveTaskLocked(const std::string& task_id, bool delete_file);
 
+  struct WorkerControl {
+    std::atomic<bool> stopped{false};
+    std::mutex handle_mutex;
+    void* h_session = nullptr;
+    void* h_connect = nullptr;
+    void* h_request = nullptr;
+
+    void Cancel();
+    void CloseHandles();
+  };
+
+  struct WorkerThreadEntry {
+    std::thread thread;
+    std::shared_ptr<std::atomic<bool>> finished;
+  };
+
+  struct PendingNotification {
+    std::wstring title;
+    std::wstring body;
+    DWORD info_flags = 0;
+  };
+
   void ScheduleQueueLocked();
+  void ReapFinishedWorkersLocked();
+  void EraseActiveControlLocked(const std::string& task_id,
+                                const std::shared_ptr<WorkerControl>& control);
   void RunDownloadWorker(std::string task_id,
-                         std::shared_ptr<std::atomic<bool>> stop_flag);
+                         std::shared_ptr<WorkerControl> control,
+                         std::shared_ptr<std::atomic<bool>> finished_flag);
   void EmitTaskUpdate(const TaskRecord& record);
   void StartEventDispatcher();
   void StopEventDispatcher();
   void FlushTaskUpdates();
+  void FlushNotifications();
   static LRESULT CALLBACK EventDispatcherWndProc(HWND hwnd,
                                                  UINT message,
                                                  WPARAM wparam,
                                                  LPARAM lparam);
-  void ShowSystemNotification(const TaskRecord& record);
+  void ShowSystemNotification(const TaskRecord& record,
+                              bool notifications_enabled);
 
   void PersistTasksLocked();
   void LoadPersistedTasksLocked();
@@ -143,8 +171,11 @@ class XueHuaNaviteBackgroundDownloaderPlugin : public flutter::Plugin {
   HWND event_hwnd_ = nullptr;
   std::mutex event_queue_mutex_;
   std::vector<flutter::EncodableValue> pending_events_;
+  std::vector<PendingNotification> pending_notifications_;
   bool event_dispatch_posted_ = false;
+  bool notification_dispatch_posted_ = false;
   bool dispatcher_alive_ = false;
+  bool tray_icon_added_ = false;
 
   int max_concurrent_tasks_ = 3;
   int connect_timeout_ms_ = 15000;
@@ -156,7 +187,8 @@ class XueHuaNaviteBackgroundDownloaderPlugin : public flutter::Plugin {
   bool auto_resume_on_startup_ = false;
 
   std::map<std::string, TaskRecord> tasks_;
-  std::map<std::string, std::shared_ptr<std::atomic<bool>>> active_stop_flags_;
+  std::map<std::string, std::shared_ptr<WorkerControl>> active_stop_flags_;
+  std::vector<WorkerThreadEntry> worker_threads_;
   std::atomic<bool> shutting_down_{false};
 };
 

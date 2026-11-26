@@ -73,8 +73,13 @@ public final class XueHuaNaviteBackgroundDownloaderPlugin: NSObject,
     )
 
     pathMonitor.pathUpdateHandler = { [weak self] path in
-      self?.isNetworkAvailable = (path.status == .satisfied)
-      self?.isNetworkExpensive = path.isExpensive
+      guard let self = self else { return }
+      let available = (path.status == .satisfied)
+      let expensive = path.isExpensive
+      self.stateQueue.async {
+        self.isNetworkAvailable = available
+        self.isNetworkExpensive = expensive
+      }
     }
     pathMonitor.start(queue: DispatchQueue.global(qos: .utility))
 
@@ -1205,13 +1210,33 @@ public final class XueHuaNaviteBackgroundDownloaderPlugin: NSObject,
   }
 
   private static func computeChecksum(fileURL: URL, algorithm: String) -> String? {
-    guard let data = try? Data(contentsOf: fileURL, options: .mappedIfSafe) else { return nil }
-    if algorithm.lowercased() == "md5" {
-      let digest = Insecure.MD5.hash(data: data)
-      return digest.map { String(format: "%02x", $0) }.joined()
-    } else {
-      let digest = SHA256.hash(data: data)
-      return digest.map { String(format: "%02x", $0) }.joined()
+    guard let handle = try? FileHandle(forReadingFrom: fileURL) else { return nil }
+    defer { try? handle.close() }
+    let chunkSize = 64 * 1024
+    do {
+      if algorithm.lowercased() == "md5" {
+        var hasher = Insecure.MD5()
+        while true {
+          let chunk: Data? = try autoreleasepool {
+            try handle.read(upToCount: chunkSize)
+          }
+          guard let data = chunk, !data.isEmpty else { break }
+          hasher.update(data: data)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+      } else {
+        var hasher = SHA256()
+        while true {
+          let chunk: Data? = try autoreleasepool {
+            try handle.read(upToCount: chunkSize)
+          }
+          guard let data = chunk, !data.isEmpty else { break }
+          hasher.update(data: data)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+      }
+    } catch {
+      return nil
     }
   }
 

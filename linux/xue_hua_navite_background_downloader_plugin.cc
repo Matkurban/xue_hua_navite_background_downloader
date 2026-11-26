@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -345,6 +346,23 @@ class LinuxDownloaderEngine {
   static LinuxDownloaderEngine& Instance() {
     static LinuxDownloaderEngine inst;
     return inst;
+  }
+
+  ~LinuxDownloaderEngine() {
+    shutting_down_.store(true);
+    std::vector<WorkerThreadEntry> threads_to_join;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      for (auto& kv : active_stops_) {
+        kv.second->store(true);
+      }
+      threads_to_join.swap(worker_threads_);
+    }
+    for (auto& entry : threads_to_join) {
+      if (entry.thread.joinable()) {
+        entry.thread.join();
+      }
+    }
   }
 
   void AttachPlugin(XueHuaNaviteBackgroundDownloaderPlugin* plugin) {
@@ -703,6 +721,10 @@ class LinuxDownloaderEngine {
   LinuxTaskRecord* RetryLocked(const std::string& id) {
     auto it = tasks_.find(id);
     if (it == tasks_.end()) return nullptr;
+    auto st = active_stops_.find(id);
+    if (st != active_stops_.end()) {
+      st->second->store(true);
+    }
     auto& r = it->second;
     r.status = "queued";
     r.retry_count = 0;
@@ -730,7 +752,31 @@ class LinuxDownloaderEngine {
     return true;
   }
 
+  void ReapFinishedWorkersLocked() {
+    for (auto it = worker_threads_.begin(); it != worker_threads_.end();) {
+      if (it->finished && it->finished->load() && it->thread.joinable()) {
+        it->thread.join();
+        it = worker_threads_.erase(it);
+      } else if (!it->thread.joinable()) {
+        it = worker_threads_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+
+  void EraseActiveStopLocked(
+      const std::string& task_id,
+      const std::shared_ptr<std::atomic<bool>>& stop_flag) {
+    auto it = active_stops_.find(task_id);
+    if (it != active_stops_.end() && it->second == stop_flag) {
+      active_stops_.erase(it);
+    }
+  }
+
   void ScheduleQueueLocked() {
+    ReapFinishedWorkersLocked();
+    if (shutting_down_.load()) return;
     int avail = max_concurrent_tasks_ - static_cast<int>(active_stops_.size());
     if (avail <= 0) return;
     std::vector<LinuxTaskRecord*> candidates;
@@ -754,25 +800,39 @@ class LinuxDownloaderEngine {
       r->updated_at_ms = NowMs();
       EmitEventOnMain(*r);
       auto stop_flag = std::make_shared<std::atomic<bool>>(false);
+      auto finished_flag = std::make_shared<std::atomic<bool>>(false);
       active_stops_[r->task_id] = stop_flag;
       std::string tid = r->task_id;
-      std::thread([this, tid, stop_flag]() {
-        RunWorker(tid, stop_flag);
-      }).detach();
+      worker_threads_.push_back(WorkerThreadEntry{
+          std::thread([this, tid, stop_flag, finished_flag]() {
+            RunWorker(tid, stop_flag, finished_flag);
+          }),
+          finished_flag});
     }
   }
 
   void RunWorker(std::string task_id,
-                 std::shared_ptr<std::atomic<bool>> stop_flag) {
+                 std::shared_ptr<std::atomic<bool>> stop_flag,
+                 std::shared_ptr<std::atomic<bool>> finished_flag) {
+    struct ScopedFinish {
+      std::shared_ptr<std::atomic<bool>> flag;
+      ~ScopedFinish() {
+        if (flag) flag->store(true);
+      }
+    } scoped_finish{finished_flag};
+
     LinuxTaskRecord snap;
     int64_t interval_ms = 250;
-    int connect_ms = connect_timeout_ms_;
-    int read_ms = read_timeout_ms_;
-    std::string user_agent = user_agent_;
+    int connect_ms = 15000;
+    int read_ms = 30000;
+    std::string user_agent;
     {
       std::lock_guard<std::mutex> lock(mu_);
       auto it = tasks_.find(task_id);
-      if (it == tasks_.end()) return;
+      if (it == tasks_.end()) {
+        EraseActiveStopLocked(task_id, stop_flag);
+        return;
+      }
       snap = it->second;
       interval_ms = progress_interval_ms_;
       connect_ms = connect_timeout_ms_;
@@ -790,7 +850,7 @@ class LinuxDownloaderEngine {
           snap.conflict_resolution == "fail") {
         std::lock_guard<std::mutex> lock(mu_);
         auto it = tasks_.find(task_id);
-        if (it != tasks_.end()) {
+        if (it != tasks_.end() && it->second.status == "running") {
           if (snap.conflict_resolution == "skip") {
             const int64_t size = static_cast<int64_t>(fs::file_size(dest_path, ec));
             it->second.downloaded_bytes = size;
@@ -808,7 +868,7 @@ class LinuxDownloaderEngine {
           EmitEventOnMain(it->second);
           SendDesktopNotificationLocked(it->second);
         }
-        active_stops_.erase(task_id);
+        EraseActiveStopLocked(task_id, stop_flag);
         ScheduleQueueLocked();
         return;
       }
@@ -825,6 +885,11 @@ class LinuxDownloaderEngine {
     std::string err_msg;
 
 #if defined(HAVE_LIBCURL)
+    static std::once_flag curl_global_init_flag;
+    std::call_once(curl_global_init_flag, []() {
+      curl_global_init(CURL_GLOBAL_DEFAULT);
+    });
+
     struct ProgressCtx {
       std::string task_id;
       int64_t offset;
@@ -937,7 +1002,7 @@ class LinuxDownloaderEngine {
     }
 #else
     std::ostringstream cmd;
-    cmd << "curl -sS -L --connect-timeout " << (connect_timeout_ms_ / 1000);
+    cmd << "curl -sS -L --connect-timeout " << (connect_ms / 1000);
     if (offset > 0) cmd << " -C " << offset;
     cmd << " -o \"" << part_path.string() << "\" \"" << snap.url << "\"";
     int rc = std::system(cmd.str().c_str());
@@ -945,9 +1010,27 @@ class LinuxDownloaderEngine {
     if (!ok) err_msg = "curl transfer failed";
 #endif
 
-    if (stop_flag->load()) {
+    if (stop_flag->load() || shutting_down_.load()) {
       std::lock_guard<std::mutex> lock(mu_);
-      active_stops_.erase(task_id);
+      EraseActiveStopLocked(task_id, stop_flag);
+      ScheduleQueueLocked();
+      return;
+    }
+
+    // Compute checksum outside mu_ so large files do not block the GTK main thread.
+    std::string computed_checksum;
+    bool checksum_mismatch = false;
+    if (ok && !snap.expected_checksum.empty()) {
+      computed_checksum =
+          ComputeFileChecksumGlib(part_path, snap.checksum_algorithm);
+      if (computed_checksum != AsciiLower(snap.expected_checksum)) {
+        checksum_mismatch = true;
+      }
+    }
+
+    if (stop_flag->load() || shutting_down_.load()) {
+      std::lock_guard<std::mutex> lock(mu_);
+      EraseActiveStopLocked(task_id, stop_flag);
       ScheduleQueueLocked();
       return;
     }
@@ -955,56 +1038,52 @@ class LinuxDownloaderEngine {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = tasks_.find(task_id);
     if (it == tasks_.end() || it->second.status != "running") {
-      active_stops_.erase(task_id);
+      EraseActiveStopLocked(task_id, stop_flag);
       ScheduleQueueLocked();
       return;
     }
-    if (it != tasks_.end()) {
-      if (ok) {
-        if (!snap.expected_checksum.empty()) {
-          std::string computed =
-              ComputeFileChecksumGlib(part_path, snap.checksum_algorithm);
-          it->second.computed_checksum = computed;
-          if (computed != AsciiLower(snap.expected_checksum)) {
-            fs::remove(part_path, ec);
-            it->second.status = "failed";
-            it->second.error_code = "checksum_mismatch";
-            it->second.error_message = "Checksum mismatch";
-            it->second.updated_at_ms = NowMs();
-            PersistLocked();
-            EmitEventOnMain(it->second);
-            SendDesktopNotificationLocked(it->second);
-            active_stops_.erase(task_id);
-            ScheduleQueueLocked();
-            return;
-          }
+    if (ok) {
+      if (!snap.expected_checksum.empty()) {
+        it->second.computed_checksum = computed_checksum;
+        if (checksum_mismatch) {
+          fs::remove(part_path, ec);
+          it->second.status = "failed";
+          it->second.error_code = "checksum_mismatch";
+          it->second.error_message = "Checksum mismatch";
+          it->second.updated_at_ms = NowMs();
+          PersistLocked();
+          EmitEventOnMain(it->second);
+          SendDesktopNotificationLocked(it->second);
+          EraseActiveStopLocked(task_id, stop_flag);
+          ScheduleQueueLocked();
+          return;
         }
-        fs::remove(dest_path, ec);
-        fs::rename(part_path, dest_path, ec);
-        int64_t final_sz =
-            fs::exists(dest_path, ec)
-                ? static_cast<int64_t>(fs::file_size(dest_path, ec))
-                : 0;
-        it->second.downloaded_bytes = final_sz;
-        it->second.total_bytes = final_sz;
-        it->second.progress = 1.0;
-        it->second.bytes_per_second = 0.0;
-        it->second.estimated_remaining_ms = 0;
-        it->second.status = "completed";
-        it->second.updated_at_ms = NowMs();
-        it->second.completed_at_ms = it->second.updated_at_ms;
-      } else {
-        it->second.status = "failed";
-        it->second.error_code = err_code;
-        it->second.error_message = err_msg;
-        it->second.http_status_code = http_code;
-        it->second.updated_at_ms = NowMs();
       }
-      PersistLocked();
-      EmitEventOnMain(it->second);
-      SendDesktopNotificationLocked(it->second);
+      fs::remove(dest_path, ec);
+      fs::rename(part_path, dest_path, ec);
+      int64_t final_sz =
+          fs::exists(dest_path, ec)
+              ? static_cast<int64_t>(fs::file_size(dest_path, ec))
+              : 0;
+      it->second.downloaded_bytes = final_sz;
+      it->second.total_bytes = final_sz;
+      it->second.progress = 1.0;
+      it->second.bytes_per_second = 0.0;
+      it->second.estimated_remaining_ms = 0;
+      it->second.status = "completed";
+      it->second.updated_at_ms = NowMs();
+      it->second.completed_at_ms = it->second.updated_at_ms;
+    } else {
+      it->second.status = "failed";
+      it->second.error_code = err_code;
+      it->second.error_message = err_msg;
+      it->second.http_status_code = http_code;
+      it->second.updated_at_ms = NowMs();
     }
-    active_stops_.erase(task_id);
+    PersistLocked();
+    EmitEventOnMain(it->second);
+    SendDesktopNotificationLocked(it->second);
+    EraseActiveStopLocked(task_id, stop_flag);
     ScheduleQueueLocked();
   }
 
@@ -1045,7 +1124,10 @@ class LinuxDownloaderEngine {
   }
 
   void PersistLocked() {
-    std::ofstream ofs(TaskStorePath(), std::ios::trunc);
+    const std::string store_path = TaskStorePath();
+    const fs::path dest_path(store_path);
+    const fs::path tmp_path(store_path + ".tmp");
+    std::ofstream ofs(tmp_path, std::ios::binary | std::ios::trunc);
     if (!ofs.is_open()) return;
     for (const auto& kv : tasks_) {
       const auto& r = kv.second;
@@ -1054,6 +1136,18 @@ class LinuxDownloaderEngine {
           << r.group << "\t" << r.priority << "\t" << r.downloaded_bytes << "\t"
           << r.total_bytes << "\t" << r.created_at_ms << "\t" << r.updated_at_ms
           << "\n";
+    }
+    ofs.flush();
+    const bool write_ok = ofs.good();
+    ofs.close();
+    std::error_code ec;
+    if (!write_ok) {
+      fs::remove(tmp_path, ec);
+      return;
+    }
+    fs::rename(tmp_path, dest_path, ec);
+    if (ec) {
+      fs::remove(tmp_path, ec);
     }
   }
 
@@ -1068,28 +1162,32 @@ class LinuxDownloaderEngine {
       std::string col;
       while (std::getline(ss, col, '\t')) cols.push_back(col);
       if (cols.size() < 12) continue;
-      LinuxTaskRecord r;
-      r.task_id = cols[0];
-      r.url = cols[1];
-      r.save_directory = cols[2];
-      r.file_name = cols[3];
-      r.save_path = cols[4];
-      r.status = cols[5];
-      if (r.status == "running" || r.status == "queued") {
-        r.status = auto_resume_ ? "queued" : "paused";
+      try {
+        LinuxTaskRecord r;
+        r.task_id = cols[0];
+        r.url = cols[1];
+        r.save_directory = cols[2];
+        r.file_name = cols[3];
+        r.save_path = cols[4];
+        r.status = cols[5];
+        if (r.status == "running" || r.status == "queued") {
+          r.status = auto_resume_ ? "queued" : "paused";
+        }
+        r.group = cols[6];
+        r.priority = cols[7];
+        r.downloaded_bytes = std::stoll(cols[8]);
+        r.total_bytes = std::stoll(cols[9]);
+        r.progress = (r.total_bytes > 0)
+                         ? std::clamp(static_cast<double>(r.downloaded_bytes) /
+                                          static_cast<double>(r.total_bytes),
+                                      0.0, 1.0)
+                         : 0.0;
+        r.created_at_ms = std::stoll(cols[10]);
+        r.updated_at_ms = std::stoll(cols[11]);
+        tasks_[r.task_id] = r;
+      } catch (const std::exception&) {
+        continue;
       }
-      r.group = cols[6];
-      r.priority = cols[7];
-      r.downloaded_bytes = std::stoll(cols[8]);
-      r.total_bytes = std::stoll(cols[9]);
-      r.progress = (r.total_bytes > 0)
-                       ? std::clamp(static_cast<double>(r.downloaded_bytes) /
-                                        static_cast<double>(r.total_bytes),
-                                    0.0, 1.0)
-                       : 0.0;
-      r.created_at_ms = std::stoll(cols[10]);
-      r.updated_at_ms = std::stoll(cols[11]);
-      tasks_[r.task_id] = r;
     }
   }
 
@@ -1104,8 +1202,15 @@ class LinuxDownloaderEngine {
   std::string user_agent_ = "XueHuaNativeBackgroundDownloader/1.0.0";
   std::map<std::string, std::string> default_headers_;
   bool auto_resume_ = false;
+  struct WorkerThreadEntry {
+    std::thread thread;
+    std::shared_ptr<std::atomic<bool>> finished;
+  };
+
   std::map<std::string, LinuxTaskRecord> tasks_;
   std::map<std::string, std::shared_ptr<std::atomic<bool>>> active_stops_;
+  std::vector<WorkerThreadEntry> worker_threads_;
+  std::atomic<bool> shutting_down_{false};
 };
 
 }  // namespace

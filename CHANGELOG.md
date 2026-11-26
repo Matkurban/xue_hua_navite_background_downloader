@@ -1,3 +1,12 @@
+## 1.0.10
+
+- Android: refactor `XueHuaDownloadForegroundService` and `XueHuaNaviteBackgroundDownloaderPlugin` lifecycle coordination to prevent `ForegroundServiceDidNotStartInTimeException` and Android 12+ `BackgroundServiceStartNotAllowedException` (never send `ACTION_STOP` when the service has not started, defer stop requests until `startForeground()` fulfills the system contract, stop active services in-process via `stopSelf(startId)` or `stopService()`, return `START_NOT_STICKY`, handle null intents and `startForeground()` failures via `stopSelf(startId)`, and override Android 15+ `onTimeout(startId, fgsType)`).
+- Android: queue concurrent `requestNotificationPermission` callbacks onto a single system prompt, complete each `MethodChannel.Result` at most once, settle pending permission requests with `false` in `onDetachedFromActivity()`, and offload `pause`/`resume`/`pauseAll`/`resumeAll` worker exit waits to a background single-thread executor with `CountDownLatch` to avoid blocking the main thread.
+- Android: add JUnit 5 unit tests covering foreground service start/stop race conditions, fast worker completion/failure, null intents, `startForeground()` errors, `onTimeout`, and concurrent/detached notification permission callbacks.
+- Windows: snapshot configuration fields under `state_mutex_` before starting WinHTTP requests, manage worker thread lifetimes instead of detaching raw `this`, guard `std::stoll` parsing against corrupted persistence lines, write task persistence atomically via temporary file replacement, and dispatch `Shell_NotifyIconW` notifications on the platform thread using the message-only window handle.
+- Linux: fix unlocked reads of `user_agent_` / timeout settings in `RunWorker`, initialize libcurl once via `std::call_once(curl_global_init)`, guard `std::stoll` persistence parsing with `try/catch`, and use atomic temporary-file replacement in `PersistLocked()`.
+- macOS & iOS: switch `computeChecksum` to 64 KB streaming chunk reads for `SHA256` and `Insecure.MD5` to avoid high memory usage / Jetsam on large files, and synchronize `NWPathMonitor` updates onto `stateQueue`.
+
 ## 1.0.9
 
 - Tests: expand example integration coverage (notification permission, enqueueAll/watchGroup, watchTask, pauseAll/resumeAll/cancelAll, retry, clearCompleted, uniqueName, POST) and add `test_driver/integration_test.dart` for flutter drive.

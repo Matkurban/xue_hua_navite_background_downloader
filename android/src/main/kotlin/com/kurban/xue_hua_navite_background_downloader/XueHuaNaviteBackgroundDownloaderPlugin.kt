@@ -6,7 +6,6 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
-import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
@@ -35,8 +34,11 @@ import java.net.URLDecoder
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -61,8 +63,11 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
 
     private lateinit var methodChannel: MethodChannel
     private lateinit var eventChannel: EventChannel
-    private lateinit var applicationContext: Context
-    private val mainHandler = Handler(Looper.getMainLooper())
+    internal lateinit var applicationContext: Context
+    private val mainHandler: Handler by lazy { Handler(Looper.getMainLooper()) }
+    internal var mainThreadPoster: (Runnable) -> Unit = { mainHandler.post(it) }
+    internal var sdkIntProvider: () -> Int = { Build.VERSION.SDK_INT }
+    internal var foregroundServiceDispatcher: XueHuaDownloadForegroundService.ServiceDispatcher? = null
 
     @Volatile
     private var eventSink: EventChannel.EventSink? = null
@@ -70,7 +75,9 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
     @Volatile
     private var activity: Activity? = null
     private var activityBinding: ActivityPluginBinding? = null
-    private var pendingPermissionResult: Result? = null
+    private val permissionLock = Any()
+    private val pendingPermissionResults = mutableListOf<Result>()
+    private var isRequestingNotificationPermission = false
 
     // Global downloader configuration
     @Volatile
@@ -96,9 +103,91 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
 
     private val tasks = ConcurrentHashMap<String, TaskRecord>()
     private val activeWorkers = ConcurrentHashMap<String, WorkerControl>()
-    private val workerPool = Executors.newCachedThreadPool()
+    private val executorLock = Any()
+    private var workerPool: ExecutorService = Executors.newCachedThreadPool()
+    private var controlExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val queueLock = Any()
     private val persistenceLock = Any()
+
+    private fun getWorkerPool(): ExecutorService = synchronized(executorLock) {
+        if (workerPool.isShutdown) {
+            workerPool = Executors.newCachedThreadPool()
+        }
+        workerPool
+    }
+
+    private fun getControlExecutor(): ExecutorService = synchronized(executorLock) {
+        if (controlExecutor.isShutdown) {
+            controlExecutor = Executors.newSingleThreadExecutor()
+        }
+        controlExecutor
+    }
+
+    internal fun executeControlAsync(result: Result, block: () -> Any?) {
+        try {
+            getControlExecutor().execute {
+                try {
+                    val payload = block()
+                    mainThreadPoster(Runnable { result.success(payload) })
+                } catch (t: Throwable) {
+                    mainThreadPoster(Runnable {
+                        result.error("control_error", t.message ?: t.javaClass.simpleName, null)
+                    })
+                }
+            }
+        } catch (t: Throwable) {
+            mainThreadPoster(Runnable {
+                result.error("control_error", t.message ?: t.javaClass.simpleName, null)
+            })
+        }
+    }
+
+    internal fun registerRunningTaskForTesting(
+        taskId: String,
+        savePath: String,
+        onPausedHook: () -> Unit
+    ): () -> Unit {
+        val now = System.currentTimeMillis()
+        val record = TaskRecord(
+            taskId = taskId,
+            url = "https://example.invalid/test.bin",
+            saveDirectory = File(savePath).parent ?: "",
+            fileName = File(savePath).name,
+            savePath = savePath,
+            status = "running",
+            group = "default",
+            priority = "normal",
+            conflictResolution = "overwrite",
+            method = "GET",
+            postBody = null,
+            downloadedBytes = 0L,
+            totalBytes = 1000L,
+            progress = 0.0,
+            bytesPerSecond = 0.0,
+            estimatedRemainingMs = -1L,
+            retryCount = 0,
+            maxRetries = 0,
+            supportsResume = true,
+            allowPause = true,
+            requiresUnmeteredNetwork = false,
+            expectedChecksum = null,
+            checksumAlgorithm = "sha256",
+            computedChecksum = null,
+            mimeType = null,
+            eTag = null,
+            error = null,
+            createdAtMs = now,
+            updatedAtMs = now,
+            completedAtMs = null,
+            headers = emptyMap(),
+            metadata = emptyMap(),
+            notificationConfig = NotificationConfigRecord(false, null, null, null, null, false)
+        )
+        tasks[taskId] = record
+        val control = WorkerControl(onPause = onPausedHook)
+        activeWorkers[taskId] = control
+        return { control.markExited() }
+    }
 
     override fun onAttachedToEngine(flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
         applicationContext = flutterPluginBinding.applicationContext
@@ -113,6 +202,8 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
         methodChannel.setMethodCallHandler(this)
         eventChannel.setStreamHandler(this)
 
+        getWorkerPool()
+        getControlExecutor()
         ensureNotificationChannel()
         loadPersistedTasks()
     }
@@ -121,6 +212,21 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
         methodChannel.setMethodCallHandler(null)
         eventChannel.setStreamHandler(null)
         eventSink = null
+        completePendingPermissionResults(false)
+        synchronized(queueLock) {
+            val controls = activeWorkers.values.toList()
+            activeWorkers.clear()
+            for (control in controls) {
+                control.cancel()
+            }
+            if (::applicationContext.isInitialized) {
+                updateForegroundServiceState()
+            }
+        }
+        synchronized(executorLock) {
+            controlExecutor.shutdownNow()
+            workerPool.shutdownNow()
+        }
     }
 
     override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
@@ -153,6 +259,7 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
         activityBinding?.removeRequestPermissionsResultListener(this)
         activityBinding = null
         activity = null
+        completePendingPermissionResults(false)
     }
 
     override fun onRequestPermissionsResult(
@@ -163,11 +270,22 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
         if (requestCode == REQUEST_CODE_NOTIFICATIONS) {
             val granted = grantResults.isNotEmpty() &&
                 grantResults[0] == PackageManager.PERMISSION_GRANTED
-            pendingPermissionResult?.success(granted)
-            pendingPermissionResult = null
+            completePendingPermissionResults(granted)
             return true
         }
         return false
+    }
+
+    private fun completePendingPermissionResults(granted: Boolean) {
+        val callbacks = synchronized(permissionLock) {
+            isRequestingNotificationPermission = false
+            val snapshot = pendingPermissionResults.toList()
+            pendingPermissionResults.clear()
+            snapshot
+        }
+        for (callback in callbacks) {
+            callback.success(granted)
+        }
     }
 
     override fun onMethodCall(call: MethodCall, result: Result) {
@@ -225,7 +343,7 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
                 }
                 val record = createOrResetTaskFromRequest(args)
                 scheduleQueue()
-                result.success(record.toMap())
+                result.success(synchronized(record) { record.toMap() })
             }
 
             "enqueueAll" -> {
@@ -235,7 +353,7 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
                 for (item in list) {
                     val reqMap = item as? Map<*, *> ?: continue
                     val record = createOrResetTaskFromRequest(reqMap)
-                    created.add(record.toMap())
+                    created.add(synchronized(record) { record.toMap() })
                 }
                 scheduleQueue()
                 result.success(created)
@@ -243,16 +361,20 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
 
             "pause" -> {
                 val taskId = call.argument<String>("taskId") ?: ""
-                val updated = pauseInternal(taskId)
-                scheduleQueue()
-                result.success(updated?.toMap())
+                executeControlAsync(result) {
+                    val updated = pauseInternal(taskId)
+                    scheduleQueue()
+                    updated?.let { synchronized(it) { it.toMap() } }
+                }
             }
 
             "resume" -> {
                 val taskId = call.argument<String>("taskId") ?: ""
-                val updated = resumeInternal(taskId)
-                scheduleQueue()
-                result.success(updated?.toMap())
+                executeControlAsync(result) {
+                    val updated = resumeInternal(taskId)
+                    scheduleQueue()
+                    updated?.let { synchronized(it) { it.toMap() } }
+                }
             }
 
             "cancel" -> {
@@ -260,14 +382,14 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
                 val deletePartial = call.argument<Boolean>("deletePartialFile") ?: true
                 val updated = cancelInternal(taskId, deletePartial)
                 scheduleQueue()
-                result.success(updated?.toMap())
+                result.success(updated?.let { synchronized(it) { it.toMap() } })
             }
 
             "retry" -> {
                 val taskId = call.argument<String>("taskId") ?: ""
                 val updated = retryInternal(taskId)
                 scheduleQueue()
-                result.success(updated?.toMap())
+                result.success(updated?.let { synchronized(it) { it.toMap() } })
             }
 
             "removeTask" -> {
@@ -280,28 +402,38 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
 
             "pauseAll" -> {
                 val group = call.argument<String>("group")
-                val affected = mutableListOf<Map<String, Any?>>()
-                for (record in tasks.values) {
-                    if (group != null && record.group != group) continue
-                    if (record.status == "queued" || record.status == "running") {
-                        pauseInternal(record.taskId)?.let { affected.add(it.toMap()) }
+                executeControlAsync(result) {
+                    val affected = mutableListOf<Map<String, Any?>>()
+                    for (record in tasks.values) {
+                        if (group != null && record.group != group) continue
+                        val status = synchronized(record) { record.status }
+                        if (status == "queued" || status == "running") {
+                            pauseInternal(record.taskId)?.let { rec ->
+                                affected.add(synchronized(rec) { rec.toMap() })
+                            }
+                        }
                     }
+                    scheduleQueue()
+                    affected
                 }
-                scheduleQueue()
-                result.success(affected)
             }
 
             "resumeAll" -> {
                 val group = call.argument<String>("group")
-                val affected = mutableListOf<Map<String, Any?>>()
-                for (record in tasks.values) {
-                    if (group != null && record.group != group) continue
-                    if (record.status == "paused") {
-                        resumeInternal(record.taskId)?.let { affected.add(it.toMap()) }
+                executeControlAsync(result) {
+                    val affected = mutableListOf<Map<String, Any?>>()
+                    for (record in tasks.values) {
+                        if (group != null && record.group != group) continue
+                        val status = synchronized(record) { record.status }
+                        if (status == "paused") {
+                            resumeInternal(record.taskId)?.let { rec ->
+                                affected.add(synchronized(rec) { rec.toMap() })
+                            }
+                        }
                     }
+                    scheduleQueue()
+                    affected
                 }
-                scheduleQueue()
-                result.success(affected)
             }
 
             "cancelAll" -> {
@@ -310,8 +442,11 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
                 val affected = mutableListOf<Map<String, Any?>>()
                 for (record in tasks.values) {
                     if (group != null && record.group != group) continue
-                    if (record.status == "queued" || record.status == "running" || record.status == "paused") {
-                        cancelInternal(record.taskId, deletePartial)?.let { affected.add(it.toMap()) }
+                    val status = synchronized(record) { record.status }
+                    if (status == "queued" || status == "running" || status == "paused") {
+                        cancelInternal(record.taskId, deletePartial)?.let { rec ->
+                            affected.add(synchronized(rec) { rec.toMap() })
+                        }
                     }
                 }
                 scheduleQueue()
@@ -327,9 +462,10 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
                     val entry = iterator.next()
                     val record = entry.value
                     if (group != null && record.group != group) continue
-                    if (record.status == "completed") {
+                    val (status, savePath) = synchronized(record) { record.status to record.savePath }
+                    if (status == "completed") {
                         if (deleteFiles) {
-                            runCatching { File(record.savePath).delete() }
+                            runCatching { File(savePath).delete() }
                         }
                         cancelTaskNotification(record.taskId)
                         iterator.remove()
@@ -344,7 +480,7 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
 
             "getTask" -> {
                 val taskId = call.argument<String>("taskId") ?: ""
-                result.success(tasks[taskId]?.toMap())
+                result.success(tasks[taskId]?.let { synchronized(it) { it.toMap() } })
             }
 
             "getAllTasks" -> {
@@ -352,7 +488,7 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
                 val list = tasks.values
                     .filter { group == null || it.group == group }
                     .sortedByDescending { it.createdAtMs }
-                    .map { it.toMap() }
+                    .map { synchronized(it) { it.toMap() } }
                 result.success(list)
             }
 
@@ -361,7 +497,7 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
     }
 
     private fun handleRequestNotificationPermission(result: Result) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+        if (sdkIntProvider() < Build.VERSION_CODES.TIRAMISU) {
             result.success(true)
             return
         }
@@ -376,11 +512,25 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
             result.success(false)
             return
         }
-        pendingPermissionResult = result
-        currentActivity.requestPermissions(
-            arrayOf(Manifest.permission.POST_NOTIFICATIONS),
-            REQUEST_CODE_NOTIFICATIONS
-        )
+        val shouldLaunchSystemPrompt = synchronized(permissionLock) {
+            pendingPermissionResults.add(result)
+            if (isRequestingNotificationPermission) {
+                false
+            } else {
+                isRequestingNotificationPermission = true
+                true
+            }
+        }
+        if (shouldLaunchSystemPrompt) {
+            try {
+                currentActivity.requestPermissions(
+                    arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                    REQUEST_CODE_NOTIFICATIONS
+                )
+            } catch (_: Throwable) {
+                completePendingPermissionResults(false)
+            }
+        }
     }
 
     private fun createOrResetTaskFromRequest(args: Map<*, *>): TaskRecord {
@@ -489,32 +639,32 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
             record.estimatedRemainingMs = -1L
             record.updatedAtMs = System.currentTimeMillis()
         }
-        // Stop I/O and wait for executeDownload's finally to drop this control so
-        // resume cannot overlap two writers on the same .part file.
+        // Stop I/O and wait on background controlExecutor for executeDownload's finally to
+        // drop this control so resume cannot overlap two writers on the same .part file.
         val control = activeWorkers[taskId]
         control?.pause()
         if (control != null) {
-            val waitUntil = System.currentTimeMillis() + 5000L
-            while (activeWorkers[taskId] === control && System.currentTimeMillis() < waitUntil) {
-                try {
-                    Thread.sleep(20L)
-                } catch (_: InterruptedException) {
-                    Thread.currentThread().interrupt()
-                    break
-                }
-            }
+            control.awaitExit(5000L)
             activeWorkers.remove(taskId, control)
         }
-        synchronized(record) {
-            val partFile = File("${record.savePath}.part")
-            if (partFile.exists()) {
-                record.downloadedBytes = partFile.length()
-                if (record.totalBytes > 0L) {
-                    record.progress =
-                        (record.downloadedBytes.toDouble() / record.totalBytes.toDouble()).coerceIn(0.0, 1.0)
+        val stillPaused = synchronized(record) {
+            if (tasks[taskId] !== record || record.status != "paused") {
+                false
+            } else {
+                val partFile = File("${record.savePath}.part")
+                if (partFile.exists()) {
+                    record.downloadedBytes = partFile.length()
+                    if (record.totalBytes > 0L) {
+                        record.progress =
+                            (record.downloadedBytes.toDouble() / record.totalBytes.toDouble()).coerceIn(0.0, 1.0)
+                    }
                 }
+                record.updatedAtMs = System.currentTimeMillis()
+                true
             }
-            record.updatedAtMs = System.currentTimeMillis()
+        }
+        if (!stillPaused) {
+            return tasks[taskId]
         }
         persistTasks()
         emitTaskUpdate(record)
@@ -529,15 +679,7 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
         val stale = activeWorkers[taskId]
         if (stale != null) {
             stale.cancel()
-            val waitUntil = System.currentTimeMillis() + 3000L
-            while (activeWorkers[taskId] === stale && System.currentTimeMillis() < waitUntil) {
-                try {
-                    Thread.sleep(20L)
-                } catch (_: InterruptedException) {
-                    Thread.currentThread().interrupt()
-                    break
-                }
-            }
+            stale.awaitExit(3000L)
             activeWorkers.remove(taskId, stale)
         }
         synchronized(record) {
@@ -632,7 +774,7 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
             }
 
             val candidates = tasks.values
-                .filter { it.status == "queued" && !activeWorkers.containsKey(it.taskId) }
+                .filter { synchronized(it) { it.status == "queued" } && !activeWorkers.containsKey(it.taskId) }
                 .sortedWith(
                     compareByDescending<TaskRecord> { priorityLevel(it.priority) }
                         .thenBy { it.createdAtMs }
@@ -647,7 +789,7 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
                 emitTaskUpdate(record)
                 val control = WorkerControl()
                 activeWorkers[record.taskId] = control
-                control.future = workerPool.submit {
+                control.future = getWorkerPool().submit {
                     executeDownload(record, control)
                 }
             }
@@ -744,6 +886,7 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
         } finally {
             // Only drop our own control — resume may already have replaced us.
             activeWorkers.remove(record.taskId, control)
+            control.markExited()
             scheduleQueue()
         }
     }
@@ -987,16 +1130,17 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
 
     private fun emitTaskUpdate(record: TaskRecord) {
         val snapshot = synchronized(record) { record.toMap() }
-        mainHandler.post {
+        mainThreadPoster(Runnable {
             eventSink?.success(snapshot)
-        }
+        })
     }
 
     // --- Notifications & Foreground Service ---
 
     private fun ensureNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val manager = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        if (sdkIntProvider() >= Build.VERSION_CODES.O) {
+            val manager = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+                ?: return
             val channel = NotificationChannel(
                 notificationChannelId,
                 notificationChannelName,
@@ -1010,27 +1154,16 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
     }
 
     private fun updateForegroundServiceState() {
-        if (!enableNotifications) return
+        val dispatcher = foregroundServiceDispatcher
+            ?: XueHuaDownloadForegroundService.defaultDispatcher(applicationContext)
         val activeCount = activeWorkers.size
-        val intent = Intent(applicationContext, XueHuaDownloadForegroundService::class.java)
-        try {
-            if (activeCount > 0) {
-                intent.action = XueHuaDownloadForegroundService.ACTION_START
-                intent.putExtra(XueHuaDownloadForegroundService.EXTRA_CHANNEL_ID, notificationChannelId)
-                intent.putExtra(XueHuaDownloadForegroundService.EXTRA_CHANNEL_NAME, notificationChannelName)
-                intent.putExtra(XueHuaDownloadForegroundService.EXTRA_ACTIVE_COUNT, activeCount)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    applicationContext.startForegroundService(intent)
-                } else {
-                    applicationContext.startService(intent)
-                }
-            } else {
-                intent.action = XueHuaDownloadForegroundService.ACTION_STOP
-                applicationContext.startService(intent)
-            }
-        } catch (_: Throwable) {
-            // Foreground service start may be denied on Android 12+ if initiated strictly from background.
-        }
+        XueHuaDownloadForegroundService.syncServiceState(
+            shouldRun = enableNotifications && activeCount > 0,
+            channelId = notificationChannelId,
+            channelName = notificationChannelName,
+            activeCount = activeCount,
+            dispatcher = dispatcher
+        )
     }
 
     private fun updateTaskNotification(record: TaskRecord) {
@@ -1136,7 +1269,19 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
                     val json = synchronized(record) { record.toJson() }
                     arr.put(json)
                 }
-                getPersistenceFile().writeText(arr.toString(), Charsets.UTF_8)
+                val targetFile = getPersistenceFile()
+                targetFile.parentFile?.mkdirs()
+                val tmpFile = File(targetFile.parentFile, "${targetFile.name}.tmp")
+                tmpFile.writeText(arr.toString(), Charsets.UTF_8)
+                if (!tmpFile.renameTo(targetFile)) {
+                    if (targetFile.exists()) {
+                        targetFile.delete()
+                    }
+                    if (!tmpFile.renameTo(targetFile)) {
+                        tmpFile.copyTo(targetFile, overwrite = true)
+                        tmpFile.delete()
+                    }
+                }
             }
         }
     }
@@ -1245,8 +1390,11 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
         else -> 0
     }
 
-    private class WorkerControl {
+    private class WorkerControl(
+        private val onPause: (() -> Unit)? = null
+    ) {
         private val stopped = AtomicBoolean(false)
+        private val exitLatch = CountDownLatch(1)
         @Volatile
         var future: Future<*>? = null
         @Volatile
@@ -1254,6 +1402,7 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
 
         fun pause() {
             stopped.set(true)
+            onPause?.invoke()
             // Disconnect + interrupt so a blocked read unblocks promptly.
             runCatching { connection?.disconnect() }
             future?.cancel(true)
@@ -1263,6 +1412,18 @@ class XueHuaNaviteBackgroundDownloaderPlugin :
             stopped.set(true)
             runCatching { connection?.disconnect() }
             future?.cancel(true)
+        }
+
+        fun markExited() {
+            exitLatch.countDown()
+        }
+
+        fun awaitExit(timeoutMs: Long) {
+            try {
+                exitLatch.await(timeoutMs, TimeUnit.MILLISECONDS)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
         }
 
         fun isStopped(): Boolean = stopped.get()

@@ -32,6 +32,7 @@ constexpr wchar_t kEventWindowClassName[] =
 // Private to the message-only window this plugin creates on the platform
 // thread. WM_APP keeps it out of the WM_USER range used by other windows.
 constexpr UINT kEventFlushMessage = WM_APP + 0x4855;
+constexpr UINT kNotificationFlushMessage = WM_APP + 0x4856;
 
 int64_t NowMs() {
   using namespace std::chrono;
@@ -390,15 +391,49 @@ XueHuaNaviteBackgroundDownloaderPlugin::XueHuaNaviteBackgroundDownloaderPlugin()
   LoadPersistedTasksLocked();
 }
 
+void XueHuaNaviteBackgroundDownloaderPlugin::WorkerControl::CloseHandles() {
+  HINTERNET req = nullptr;
+  HINTERNET conn = nullptr;
+  HINTERNET sess = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(handle_mutex);
+    req = static_cast<HINTERNET>(h_request);
+    h_request = nullptr;
+    conn = static_cast<HINTERNET>(h_connect);
+    h_connect = nullptr;
+    sess = static_cast<HINTERNET>(h_session);
+    h_session = nullptr;
+  }
+  if (req) WinHttpCloseHandle(req);
+  if (conn) WinHttpCloseHandle(conn);
+  if (sess) WinHttpCloseHandle(sess);
+}
+
+void XueHuaNaviteBackgroundDownloaderPlugin::WorkerControl::Cancel() {
+  stopped.store(true);
+  CloseHandles();
+}
+
 XueHuaNaviteBackgroundDownloaderPlugin::~XueHuaNaviteBackgroundDownloaderPlugin() {
   shutting_down_.store(true);
+  std::vector<std::shared_ptr<WorkerControl>> controls_to_cancel;
+  std::vector<WorkerThreadEntry> threads_to_join;
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
     for (auto& kv : active_stop_flags_) {
-      kv.second->store(true);
+      controls_to_cancel.push_back(kv.second);
     }
+    threads_to_join.swap(worker_threads_);
+  }
+  for (auto& ctrl : controls_to_cancel) {
+    if (ctrl) ctrl->Cancel();
   }
   StopEventDispatcher();
+  for (auto& entry : threads_to_join) {
+    if (entry.thread.joinable()) {
+      entry.thread.join();
+    }
+  }
 }
 
 void XueHuaNaviteBackgroundDownloaderPlugin::HandleMethodCall(
@@ -681,7 +716,7 @@ TaskRecord XueHuaNaviteBackgroundDownloaderPlugin::CreateOrResetTaskLocked(
 
   auto active_it = active_stop_flags_.find(task_id);
   if (active_it != active_stop_flags_.end()) {
-    active_it->second->store(true);
+    active_it->second->Cancel();
     active_stop_flags_.erase(active_it);
   }
 
@@ -770,11 +805,11 @@ TaskRecord* XueHuaNaviteBackgroundDownloaderPlugin::PauseLocked(
 
   auto stop_it = active_stop_flags_.find(task_id);
   if (stop_it != active_stop_flags_.end()) {
-    // The worker erases the flag when it exits. Dropping it here lets
+    // The worker erases the control when it exits. Dropping it here lets
     // ScheduleQueueLocked start another transfer while this one is still
     // draining, so maxConcurrentTasks is exceeded and resume can open a
     // second writer on the same .part file.
-    stop_it->second->store(true);
+    stop_it->second->Cancel();
   }
 
   rec.status = "paused";
@@ -818,7 +853,7 @@ TaskRecord* XueHuaNaviteBackgroundDownloaderPlugin::CancelLocked(
 
   auto stop_it = active_stop_flags_.find(task_id);
   if (stop_it != active_stop_flags_.end()) {
-    stop_it->second->store(true);
+    stop_it->second->Cancel();
   }
 
   if (delete_partial) {
@@ -845,7 +880,7 @@ TaskRecord* XueHuaNaviteBackgroundDownloaderPlugin::RetryLocked(
 
   auto stop_it = active_stop_flags_.find(task_id);
   if (stop_it != active_stop_flags_.end()) {
-    stop_it->second->store(true);
+    stop_it->second->Cancel();
   }
 
   fs::path part_path = fs::u8path(rec.save_path + ".part");
@@ -874,7 +909,7 @@ bool XueHuaNaviteBackgroundDownloaderPlugin::RemoveTaskLocked(
     const std::string& task_id, bool delete_file) {
   auto stop_it = active_stop_flags_.find(task_id);
   if (stop_it != active_stop_flags_.end()) {
-    stop_it->second->store(true);
+    stop_it->second->Cancel();
   }
   auto it = tasks_.find(task_id);
   if (it == tasks_.end()) return false;
@@ -888,7 +923,22 @@ bool XueHuaNaviteBackgroundDownloaderPlugin::RemoveTaskLocked(
   return true;
 }
 
+void XueHuaNaviteBackgroundDownloaderPlugin::ReapFinishedWorkersLocked() {
+  for (auto it = worker_threads_.begin(); it != worker_threads_.end();) {
+    if (it->finished && it->finished->load() && it->thread.joinable()) {
+      it->thread.join();
+      it = worker_threads_.erase(it);
+    } else if (!it->thread.joinable()) {
+      it = worker_threads_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
 void XueHuaNaviteBackgroundDownloaderPlugin::ScheduleQueueLocked() {
+  ReapFinishedWorkersLocked();
+  if (shutting_down_.load()) return;
   int running_count = static_cast<int>(active_stop_flags_.size());
   int available = max_concurrent_tasks_ - running_count;
   if (available <= 0) return;
@@ -916,23 +966,54 @@ void XueHuaNaviteBackgroundDownloaderPlugin::ScheduleQueueLocked() {
     rec->updated_at_ms = NowMs();
     EmitTaskUpdate(*rec);
 
-    auto stop_flag = std::make_shared<std::atomic<bool>>(false);
-    active_stop_flags_[rec->task_id] = stop_flag;
+    auto control = std::make_shared<WorkerControl>();
+    auto finished_flag = std::make_shared<std::atomic<bool>>(false);
+    active_stop_flags_[rec->task_id] = control;
     std::string tid = rec->task_id;
-    std::thread([this, tid, stop_flag]() {
-      RunDownloadWorker(tid, stop_flag);
-    }).detach();
+    worker_threads_.push_back(WorkerThreadEntry{
+        std::thread([this, tid, control, finished_flag]() {
+          RunDownloadWorker(tid, control, finished_flag);
+        }),
+        finished_flag});
+  }
+}
+
+void XueHuaNaviteBackgroundDownloaderPlugin::EraseActiveControlLocked(
+    const std::string& task_id,
+    const std::shared_ptr<WorkerControl>& control) {
+  auto it = active_stop_flags_.find(task_id);
+  if (it != active_stop_flags_.end() && it->second == control) {
+    active_stop_flags_.erase(it);
   }
 }
 
 void XueHuaNaviteBackgroundDownloaderPlugin::RunDownloadWorker(
-    std::string task_id, std::shared_ptr<std::atomic<bool>> stop_flag) {
+    std::string task_id, std::shared_ptr<WorkerControl> control,
+    std::shared_ptr<std::atomic<bool>> finished_flag) {
+  struct ScopedFinish {
+    std::shared_ptr<std::atomic<bool>> flag;
+    ~ScopedFinish() {
+      if (flag) flag->store(true);
+    }
+  } scoped_finish{finished_flag};
+
   TaskRecord snapshot;
+  std::string user_agent;
+  int connect_timeout_ms = 15000;
+  int read_timeout_ms = 30000;
+  int64_t progress_update_interval_ms = 250;
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
     auto it = tasks_.find(task_id);
-    if (it == tasks_.end()) return;
+    if (it == tasks_.end()) {
+      EraseActiveControlLocked(task_id, control);
+      return;
+    }
     snapshot = it->second;
+    user_agent = user_agent_;
+    connect_timeout_ms = connect_timeout_ms_;
+    read_timeout_ms = read_timeout_ms_;
+    progress_update_interval_ms = progress_update_interval_ms_;
   }
 
   fs::path dest_path = fs::u8path(snapshot.save_path);
@@ -945,7 +1026,7 @@ void XueHuaNaviteBackgroundDownloaderPlugin::RunDownloadWorker(
       int64_t sz = static_cast<int64_t>(fs::file_size(dest_path, ec));
       std::lock_guard<std::mutex> lock(state_mutex_);
       auto it = tasks_.find(task_id);
-      if (it != tasks_.end()) {
+      if (it != tasks_.end() && it->second.status == "running") {
         it->second.downloaded_bytes = sz;
         it->second.total_bytes = sz;
         it->second.progress = 1.0;
@@ -954,15 +1035,15 @@ void XueHuaNaviteBackgroundDownloaderPlugin::RunDownloadWorker(
         it->second.completed_at_ms = it->second.updated_at_ms;
         PersistTasksLocked();
         EmitTaskUpdate(it->second);
-        ShowSystemNotification(it->second);
+        ShowSystemNotification(it->second, enable_notifications_);
       }
-      active_stop_flags_.erase(task_id);
+      EraseActiveControlLocked(task_id, control);
       ScheduleQueueLocked();
       return;
     } else if (snapshot.conflict_resolution == "fail") {
       std::lock_guard<std::mutex> lock(state_mutex_);
       auto it = tasks_.find(task_id);
-      if (it != tasks_.end()) {
+      if (it != tasks_.end() && it->second.status == "running") {
         it->second.status = "failed";
         it->second.error = ErrorRecord{true, "file_exists",
                                        "Destination file already exists", 0,
@@ -970,9 +1051,9 @@ void XueHuaNaviteBackgroundDownloaderPlugin::RunDownloadWorker(
         it->second.updated_at_ms = NowMs();
         PersistTasksLocked();
         EmitTaskUpdate(it->second);
-        ShowSystemNotification(it->second);
+        ShowSystemNotification(it->second, enable_notifications_);
       }
-      active_stop_flags_.erase(task_id);
+      EraseActiveControlLocked(task_id, control);
       ScheduleQueueLocked();
       return;
     }
@@ -992,7 +1073,7 @@ void XueHuaNaviteBackgroundDownloaderPlugin::RunDownloadWorker(
                        &url_comp)) {
     std::lock_guard<std::mutex> lock(state_mutex_);
     auto it = tasks_.find(task_id);
-    if (it != tasks_.end()) {
+    if (it != tasks_.end() && it->second.status == "running") {
       it->second.status = "failed";
       it->second.error = ErrorRecord{true, "invalid_url",
                                      "Invalid URL format", 0, false, false};
@@ -1000,7 +1081,7 @@ void XueHuaNaviteBackgroundDownloaderPlugin::RunDownloadWorker(
       PersistTasksLocked();
       EmitTaskUpdate(it->second);
     }
-    active_stop_flags_.erase(task_id);
+    EraseActiveControlLocked(task_id, control);
     ScheduleQueueLocked();
     return;
   }
@@ -1010,25 +1091,55 @@ void XueHuaNaviteBackgroundDownloaderPlugin::RunDownloadWorker(
     existing_offset = static_cast<int64_t>(fs::file_size(part_path, ec));
   }
 
-  HINTERNET hSession = WinHttpOpen(
-      Utf8ToWide(user_agent_).c_str(), WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-      WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-  if (hSession) {
-    WinHttpSetTimeouts(hSession, connect_timeout_ms_, connect_timeout_ms_,
-                       read_timeout_ms_, read_timeout_ms_);
+  HINTERNET hSession = nullptr;
+  HINTERNET hConnect = nullptr;
+  HINTERNET hRequest = nullptr;
+
+  if (!control->stopped.load() && !shutting_down_.load()) {
+    hSession = WinHttpOpen(
+        Utf8ToWide(user_agent).c_str(), WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (hSession) {
+      { std::lock_guard<std::mutex> hlock(control->handle_mutex); control->h_session = hSession; }
+      if (control->stopped.load() || shutting_down_.load()) {
+        control->CloseHandles();
+        hSession = nullptr;
+      } else {
+        WinHttpSetTimeouts(hSession, connect_timeout_ms, connect_timeout_ms,
+                           read_timeout_ms, read_timeout_ms);
+      }
+    }
   }
 
-  HINTERNET hConnect =
-      hSession ? WinHttpConnect(hSession, host_buf, url_comp.nPort, 0)
-               : nullptr;
-  DWORD flags =
-      (url_comp.nScheme == INTERNET_SCHEME_HTTPS) ? WINHTTP_FLAG_SECURE : 0;
-  std::wstring verb = Utf8ToWide(snapshot.method);
-  HINTERNET hRequest =
-      hConnect ? WinHttpOpenRequest(hConnect, verb.c_str(), path_buf, nullptr,
-                                    WINHTTP_NO_REFERER,
-                                    WINHTTP_DEFAULT_ACCEPT_TYPES, flags)
-               : nullptr;
+  if (hSession && !control->stopped.load() && !shutting_down_.load()) {
+    hConnect = WinHttpConnect(hSession, host_buf, url_comp.nPort, 0);
+    if (hConnect) {
+      { std::lock_guard<std::mutex> hlock(control->handle_mutex); control->h_connect = hConnect; }
+      if (control->stopped.load() || shutting_down_.load()) {
+        control->CloseHandles();
+        hSession = nullptr;
+        hConnect = nullptr;
+      }
+    }
+  }
+
+  if (hConnect && !control->stopped.load() && !shutting_down_.load()) {
+    DWORD flags =
+        (url_comp.nScheme == INTERNET_SCHEME_HTTPS) ? WINHTTP_FLAG_SECURE : 0;
+    std::wstring verb = Utf8ToWide(snapshot.method);
+    hRequest = WinHttpOpenRequest(hConnect, verb.c_str(), path_buf, nullptr,
+                                  WINHTTP_NO_REFERER,
+                                  WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
+    if (hRequest) {
+      { std::lock_guard<std::mutex> hlock(control->handle_mutex); control->h_request = hRequest; }
+      if (control->stopped.load() || shutting_down_.load()) {
+        control->CloseHandles();
+        hSession = nullptr;
+        hConnect = nullptr;
+        hRequest = nullptr;
+      }
+    }
+  }
 
   bool success = false;
   int status_code = 0;
@@ -1095,7 +1206,7 @@ void XueHuaNaviteBackgroundDownloaderPlugin::RunDownloadWorker(
         std::vector<char> buffer(32 * 1024);
         bool io_ok = ofs.is_open();
 
-        while (io_ok && !stop_flag->load() && !shutting_down_.load()) {
+        while (io_ok && !control->stopped.load() && !shutting_down_.load()) {
           avail = 0;
           if (!WinHttpQueryDataAvailable(hRequest, &avail) || avail == 0) {
             break;
@@ -1112,7 +1223,7 @@ void XueHuaNaviteBackgroundDownloaderPlugin::RunDownloadWorker(
 
           int64_t now = NowMs();
           int64_t elapsed = now - last_emit_ms;
-          if (elapsed >= progress_update_interval_ms_) {
+          if (elapsed >= progress_update_interval_ms) {
             int64_t delta = current_bytes - last_emit_bytes;
             double inst_speed =
                 elapsed > 0 ? (static_cast<double>(delta) * 1000.0 / elapsed)
@@ -1149,7 +1260,7 @@ void XueHuaNaviteBackgroundDownloaderPlugin::RunDownloadWorker(
         }
         ofs.close();
 
-        if (!stop_flag->load() && io_ok) {
+        if (!control->stopped.load() && !shutting_down_.load() && io_ok) {
           success = true;
         }
       } else {
@@ -1159,13 +1270,11 @@ void XueHuaNaviteBackgroundDownloaderPlugin::RunDownloadWorker(
     }
   }
 
-  if (hRequest) WinHttpCloseHandle(hRequest);
-  if (hConnect) WinHttpCloseHandle(hConnect);
-  if (hSession) WinHttpCloseHandle(hSession);
+  control->CloseHandles();
 
-  if (stop_flag->load() || shutting_down_.load()) {
+  if (control->stopped.load() || shutting_down_.load()) {
     std::lock_guard<std::mutex> lock(state_mutex_);
-    active_stop_flags_.erase(task_id);
+    EraseActiveControlLocked(task_id, control);
     ScheduleQueueLocked();
     return;
   }
@@ -1193,9 +1302,9 @@ void XueHuaNaviteBackgroundDownloaderPlugin::RunDownloadWorker(
           it->second.updated_at_ms = NowMs();
           PersistTasksLocked();
           EmitTaskUpdate(it->second);
-          ShowSystemNotification(it->second);
+          ShowSystemNotification(it->second, enable_notifications_);
         }
-        active_stop_flags_.erase(task_id);
+        EraseActiveControlLocked(task_id, control);
         ScheduleQueueLocked();
         return;
       }
@@ -1223,7 +1332,7 @@ void XueHuaNaviteBackgroundDownloaderPlugin::RunDownloadWorker(
       it->second.completed_at_ms = it->second.updated_at_ms;
       PersistTasksLocked();
       EmitTaskUpdate(it->second);
-      ShowSystemNotification(it->second);
+      ShowSystemNotification(it->second, enable_notifications_);
     }
   } else {
     std::lock_guard<std::mutex> lock(state_mutex_);
@@ -1238,12 +1347,12 @@ void XueHuaNaviteBackgroundDownloaderPlugin::RunDownloadWorker(
       it->second.updated_at_ms = NowMs();
       PersistTasksLocked();
       EmitTaskUpdate(it->second);
-      ShowSystemNotification(it->second);
+      ShowSystemNotification(it->second, enable_notifications_);
     }
   }
 
   std::lock_guard<std::mutex> lock(state_mutex_);
-  active_stop_flags_.erase(task_id);
+  EraseActiveControlLocked(task_id, control);
   ScheduleQueueLocked();
 }
 
@@ -1277,13 +1386,23 @@ void XueHuaNaviteBackgroundDownloaderPlugin::StopEventDispatcher() {
     hwnd = event_hwnd_;
     event_hwnd_ = nullptr;
     pending_events_.clear();
+    pending_notifications_.clear();
     event_dispatch_posted_ = false;
+    notification_dispatch_posted_ = false;
   }
   if (hwnd != nullptr) {
+    if (tray_icon_added_) {
+      NOTIFYICONDATAW nid{};
+      nid.cbSize = sizeof(nid);
+      nid.hWnd = hwnd;
+      nid.uID = 98401;
+      Shell_NotifyIconW(NIM_DELETE, &nid);
+      tray_icon_added_ = false;
+    }
     ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
     MSG leftover;
     while (::PeekMessageW(&leftover, hwnd, kEventFlushMessage,
-                          kEventFlushMessage, PM_REMOVE)) {
+                          kNotificationFlushMessage, PM_REMOVE)) {
     }
     ::DestroyWindow(hwnd);
   }
@@ -1305,6 +1424,41 @@ void XueHuaNaviteBackgroundDownloaderPlugin::FlushTaskUpdates() {
   }
 }
 
+void XueHuaNaviteBackgroundDownloaderPlugin::FlushNotifications() {
+  std::vector<PendingNotification> batch;
+  HWND hwnd = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(event_queue_mutex_);
+    batch.swap(pending_notifications_);
+    notification_dispatch_posted_ = false;
+    if (dispatcher_alive_) {
+      hwnd = event_hwnd_;
+    }
+  }
+  if (hwnd == nullptr || shutting_down_.load()) {
+    return;
+  }
+  for (const auto& item : batch) {
+    NOTIFYICONDATAW nid{};
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = hwnd;
+    nid.uID = 98401;
+    nid.uFlags = NIF_INFO | NIF_ICON | NIF_TIP;
+    nid.hIcon = LoadIcon(nullptr, IDI_INFORMATION);
+    nid.dwInfoFlags = item.info_flags;
+    wcsncpy_s(nid.szInfoTitle, item.title.c_str(), _TRUNCATE);
+    wcsncpy_s(nid.szInfo, item.body.c_str(), _TRUNCATE);
+    wcsncpy_s(nid.szTip, L"XueHua Background Downloader", _TRUNCATE);
+    if (!tray_icon_added_) {
+      if (Shell_NotifyIconW(NIM_ADD, &nid)) {
+        tray_icon_added_ = true;
+      }
+    } else {
+      Shell_NotifyIconW(NIM_MODIFY, &nid);
+    }
+  }
+}
+
 LRESULT CALLBACK
 XueHuaNaviteBackgroundDownloaderPlugin::EventDispatcherWndProc(
     HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
@@ -1318,6 +1472,10 @@ XueHuaNaviteBackgroundDownloaderPlugin::EventDispatcherWndProc(
       ::GetWindowLongPtrW(hwnd, GWLP_USERDATA));
   if (message == kEventFlushMessage && self != nullptr) {
     self->FlushTaskUpdates();
+    return 0;
+  }
+  if (message == kNotificationFlushMessage && self != nullptr) {
+    self->FlushNotifications();
     return 0;
   }
   return ::DefWindowProcW(hwnd, message, wparam, lparam);
@@ -1349,13 +1507,8 @@ void XueHuaNaviteBackgroundDownloaderPlugin::EmitTaskUpdate(
   }
 
   if (!queued) {
-    if (shutting_down_.load()) {
-      return;
-    }
-    std::lock_guard<std::mutex> lock(sink_mutex_);
-    if (event_sink_) {
-      event_sink_->Success(std::move(event));
-    }
+    // Never call EventSink::Success from a non-platform thread when the
+    // message-only dispatcher window is unavailable or shutting down.
     return;
   }
   if (flush_now) {
@@ -1370,33 +1523,58 @@ void XueHuaNaviteBackgroundDownloaderPlugin::EmitTaskUpdate(
 }
 
 void XueHuaNaviteBackgroundDownloaderPlugin::ShowSystemNotification(
-    const TaskRecord& record) {
-  if (!enable_notifications_ || !record.notification_config.enabled) return;
-  NOTIFYICONDATAW nid{};
-  nid.cbSize = sizeof(nid);
-  nid.uID = 98401;
-  nid.uFlags = NIF_INFO | NIF_ICON | NIF_TIP;
-  nid.hIcon = LoadIcon(nullptr, IDI_INFORMATION);
-  nid.dwInfoFlags =
-      (record.status == "failed") ? NIIF_ERROR : NIIF_INFO;
-  std::wstring title = Utf8ToWide(
+    const TaskRecord& record, bool notifications_enabled) {
+  if (!notifications_enabled || !record.notification_config.enabled) return;
+  if (shutting_down_.load()) return;
+
+  PendingNotification item;
+  item.title = Utf8ToWide(
       record.notification_config.title.empty() ? record.file_name
                                                : record.notification_config.title);
-  std::wstring body = Utf8ToWide(
+  item.body = Utf8ToWide(
       record.status == "completed"
           ? ("Download complete: " + record.file_name)
           : ("Download failed: " + record.file_name));
-  wcsncpy_s(nid.szInfoTitle, title.c_str(), _TRUNCATE);
-  wcsncpy_s(nid.szInfo, body.c_str(), _TRUNCATE);
-  wcsncpy_s(nid.szTip, L"XueHua Background Downloader", _TRUNCATE);
-  Shell_NotifyIconW(NIM_ADD, &nid);
-  Shell_NotifyIconW(NIM_MODIFY, &nid);
-  Shell_NotifyIconW(NIM_DELETE, &nid);
+  item.info_flags = (record.status == "failed") ? NIIF_ERROR : NIIF_INFO;
+
+  HWND target = nullptr;
+  bool schedule = false;
+  bool flush_now = false;
+  {
+    std::lock_guard<std::mutex> lock(event_queue_mutex_);
+    if (!dispatcher_alive_ || event_hwnd_ == nullptr) {
+      // Safe degradation when no platform-thread message window is available.
+      return;
+    }
+    const bool on_platform_thread =
+        ::GetWindowThreadProcessId(event_hwnd_, nullptr) ==
+        ::GetCurrentThreadId();
+    pending_notifications_.push_back(std::move(item));
+    if (on_platform_thread) {
+      flush_now = true;
+    } else if (!notification_dispatch_posted_) {
+      notification_dispatch_posted_ = true;
+      schedule = true;
+      target = event_hwnd_;
+    }
+  }
+
+  if (flush_now) {
+    FlushNotifications();
+    return;
+  }
+  if (schedule && target != nullptr &&
+      !::PostMessageW(target, kNotificationFlushMessage, 0, 0)) {
+    std::lock_guard<std::mutex> lock(event_queue_mutex_);
+    notification_dispatch_posted_ = false;
+  }
 }
 
 void XueHuaNaviteBackgroundDownloaderPlugin::PersistTasksLocked() {
   std::string path = GetPersistenceFilePath();
-  std::ofstream ofs(fs::u8path(path), std::ios::trunc);
+  fs::path dest_path = fs::u8path(path);
+  fs::path tmp_path = fs::u8path(path + ".tmp");
+  std::ofstream ofs(tmp_path, std::ios::binary | std::ios::trunc);
   if (!ofs.is_open()) return;
   for (const auto& kv : tasks_) {
     const TaskRecord& r = kv.second;
@@ -1405,6 +1583,20 @@ void XueHuaNaviteBackgroundDownloaderPlugin::PersistTasksLocked() {
         << r.group << "\t" << r.priority << "\t" << r.downloaded_bytes << "\t"
         << r.total_bytes << "\t" << r.created_at_ms << "\t" << r.updated_at_ms
         << "\n";
+  }
+  ofs.flush();
+  const bool write_ok = ofs.good();
+  ofs.close();
+  if (!write_ok) {
+    std::error_code ec;
+    fs::remove(tmp_path, ec);
+    return;
+  }
+  if (!::MoveFileExW(tmp_path.c_str(), dest_path.c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+    std::error_code ec;
+    fs::remove(dest_path, ec);
+    fs::rename(tmp_path, dest_path, ec);
   }
 }
 
@@ -1422,28 +1614,32 @@ void XueHuaNaviteBackgroundDownloaderPlugin::LoadPersistedTasksLocked() {
       cols.push_back(col);
     }
     if (cols.size() < 12) continue;
-    TaskRecord r;
-    r.task_id = cols[0];
-    r.url = cols[1];
-    r.save_directory = cols[2];
-    r.file_name = cols[3];
-    r.save_path = cols[4];
-    r.status = cols[5];
-    if (r.status == "running" || r.status == "queued") {
-      r.status = auto_resume_on_startup_ ? "queued" : "paused";
+    try {
+      TaskRecord r;
+      r.task_id = cols[0];
+      r.url = cols[1];
+      r.save_directory = cols[2];
+      r.file_name = cols[3];
+      r.save_path = cols[4];
+      r.status = cols[5];
+      if (r.status == "running" || r.status == "queued") {
+        r.status = auto_resume_on_startup_ ? "queued" : "paused";
+      }
+      r.group = cols[6];
+      r.priority = cols[7];
+      r.downloaded_bytes = std::stoll(cols[8]);
+      r.total_bytes = std::stoll(cols[9]);
+      r.progress = (r.total_bytes > 0)
+                       ? std::clamp(static_cast<double>(r.downloaded_bytes) /
+                                        static_cast<double>(r.total_bytes),
+                                    0.0, 1.0)
+                       : 0.0;
+      r.created_at_ms = std::stoll(cols[10]);
+      r.updated_at_ms = std::stoll(cols[11]);
+      tasks_[r.task_id] = r;
+    } catch (const std::exception&) {
+      continue;
     }
-    r.group = cols[6];
-    r.priority = cols[7];
-    r.downloaded_bytes = std::stoll(cols[8]);
-    r.total_bytes = std::stoll(cols[9]);
-    r.progress = (r.total_bytes > 0)
-                     ? std::clamp(static_cast<double>(r.downloaded_bytes) /
-                                      static_cast<double>(r.total_bytes),
-                                  0.0, 1.0)
-                     : 0.0;
-    r.created_at_ms = std::stoll(cols[10]);
-    r.updated_at_ms = std::stoll(cols[11]);
-    tasks_[r.task_id] = r;
   }
 }
 
